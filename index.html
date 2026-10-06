@@ -203,7 +203,7 @@ dialog h3{margin-top:0}
 
  <div id="a-dash" class="hide">
   <div class="atop">
-   <div class="sub" id="subtabs"><button class="on" data-s="res">Results</button><button data-s="vot">Voters</button><button data-s="aud">Audit</button><button data-s="set">Settings</button></div>
+   <div class="sub" id="subtabs"><button class="on" data-s="res">Results</button><button data-s="vot">Voters</button><button data-s="cnd">Candidates</button><button data-s="aud">Audit</button><button data-s="set">Settings</button></div>
    <button class="btn line sm" id="aout">Sign out</button>
   </div>
 
@@ -215,6 +215,19 @@ dialog h3{margin-top:0}
    <input id="vq" type="search" placeholder="Search by name or Voter ID" autocomplete="off">
    <div class="seg" id="seg"></div>
    <div id="vlist"></div>
+  </div>
+
+  <div id="ap-cnd" class="hide">
+   <h2>Candidates</h2>
+   <p class="lead">Add the participants who will appear on the ballot. Candidates can be added or removed only before the first vote is cast.</p>
+   <div id="cnd-lock" class="status er hide">Voting has started, so the candidate list is locked. Erase election data in Settings to start a new election.</div>
+   <div id="cnd-form">
+    <label for="cn">Candidate name</label><input id="cn" maxlength="40" autocomplete="off">
+    <label for="cp">Party or group</label><input id="cp" maxlength="40" autocomplete="off">
+    <button class="btn block" id="cadd">Add candidate</button>
+   </div>
+   <h3>On the ballot</h3>
+   <div id="clist"></div>
   </div>
 
   <div id="ap-aud" class="hide"><div id="aud-body"></div>
@@ -265,17 +278,21 @@ const msg=(el,t,k)=>{el.textContent=t||"";el.className="status "+(k||"")};
 const fmtDate=t=>new Date(t).toLocaleDateString(undefined,{day:"numeric",month:"short"});
 const fmtTime=t=>new Date(t).toLocaleString(undefined,{day:"numeric",month:"short",hour:"2-digit",minute:"2-digit"});
 
-const CANDS=[{n:"Aarav Sharma",p:"Unity Party",c:"#2f5bea"},{n:"Meera Iyer",p:"Progress Alliance",c:"#12a150"},{n:"Rohan Das",p:"People's Front",c:"#d97706"},{n:"NOTA",p:"None of the above",c:"#667085"}];
+const DEFAULT_C=[{n:"Aarav Sharma",p:"Unity Party",c:"#2f5bea"},{n:"Meera Iyer",p:"Progress Alliance",c:"#12a150"},{n:"Rohan Das",p:"People's Front",c:"#d97706"},{n:"NOTA",p:"None of the above",c:"#667085"}];
+let CANDS=DEFAULT_C.map(x=>({...x}));
+const PALETTE=["#2f5bea","#12a150","#d97706","#c2255c","#7048e8","#0c8599","#e8590c","#5c940d"];
 const MAX_FAILS=3, SESSION_MS=240000, IDLE_MS=600000, LIVE_MIN=5, FACE_MATCH=0.8, FACE_DUP=0.9;
 
 /* ---------- storage ---------- */
 const KEY="securevote.v2";
 let mem=null,persistOK=true;
-const fresh=()=>({salt:b64(rnd(16)),voters:{},voted:[],ledger:[],admin:null,log:[]});
+const fresh=()=>({salt:b64(rnd(16)),voters:{},voted:[],ledger:[],admin:null,log:[],cands:DEFAULT_C.map(x=>({...x}))});
 const store={
  load(){let r=null;try{r=localStorage.getItem(KEY)}catch(e){persistOK=false}
   if(r){try{const m=JSON.parse(r);if(m&&m.voters&&m.ledger)mem=m}catch(e){}}
-  if(!mem)mem=fresh()},
+  if(!mem)mem=fresh();
+  if(!Array.isArray(mem.cands)||mem.cands.length<2)mem.cands=DEFAULT_C.map(x=>({...x}));
+  CANDS=mem.cands},
  save(){mem.voted.sort();try{localStorage.setItem(KEY,JSON.stringify(mem));persistOK=true}catch(e){persistOK=false}
   hide("warn",persistOK);return persistOK}
 };
@@ -387,7 +404,7 @@ $("r4new").onclick=()=>{$("rn").value=$("ri").value="";msg($("rm"),"");rShow(1)}
 enter(["rn","ri","rp","rp2"],"r1go");
 
 /* ---------- voting ---------- */
-let S=null,vSel=null;
+let S=null,vSel=null,vPick=null;
 const vShow=n=>{[1,3,4,5].forEach(i=>hide("v"+i,i!==n));setSteps($("vsteps"),n===1?1:n===3?2:3);hide("vsteps",n===5)};
 function closeSession(){if(S){clearInterval(S.tick);S=null}stopCam();hide("sess",true)}
 function endSession(text){
@@ -463,7 +480,7 @@ function drawBallot(){
  document.querySelectorAll("input[name=cand]").forEach(x=>x.onchange=()=>{vSel=+x.value;$("review").disabled=false});
  vSel=null;$("review").disabled=true;hide("vb",false);hide("vconf",true);
 }
-$("review").onclick=()=>{if(vSel===null)return;setSteps($("vsteps"),4);$("va").value="";$("vok").checked=false;$("pickname").textContent=CANDS[vSel].n;$("pickparty").textContent=CANDS[vSel].p;hide("vb",true);hide("vconf",false)};
+$("review").onclick=()=>{if(vSel===null)return;setSteps($("vsteps"),4);$("va").value="";$("vok").checked=false;vPick=CANDS[vSel].n;$("pickname").textContent=CANDS[vSel].n;$("pickparty").textContent=CANDS[vSel].p;hide("vb",true);hide("vconf",false)};
 $("vback").onclick=()=>{setSteps($("vsteps"),3);hide("vb",false);hide("vconf",true)};
 $("vcast").onclick=async()=>{
  const m=$("vm"),b=$("vcast");if(!S||vSel===null)return;
@@ -482,6 +499,7 @@ $("vcast").onclick=async()=>{
   const ts=Math.floor(Date.now()/60000)*60000;let hash=null;
   for(let t=0;t<3&&!hash;t++){
    if(!cur())return;
+   if(!CANDS[vSel]||CANDS[vSel].n!==vPick)return endSession("The candidate list changed. Please sign in and vote again.");
    const idx=mem.ledger.length,prev=idx?mem.ledger[idx-1].hash:"0";
    const h=await sha(idx+"|"+vSel+"|"+ts+"|"+prev);
    store.load();
@@ -537,13 +555,13 @@ $("aout").onclick=()=>{adminOut();adminRoute()};
 
 function showSub(s){
  document.querySelectorAll("#subtabs button").forEach(b=>b.classList.toggle("on",b.dataset.s===s));
- ["res","vot","aud","set"].forEach(x=>hide("ap-"+x,x!==s));msg($("am"),"");
+ ["res","vot","cnd","aud","set"].forEach(x=>hide("ap-"+x,x!==s));msg($("am"),"");
 }
 document.querySelectorAll("#subtabs button").forEach(b=>b.onclick=()=>{showSub(b.dataset.s);renderAdmin()});
 const state=(k,r)=>mem.voted.includes(k)?"voted":r.locked?"locked":r.status==="approved"?"approved":"pending";
 const LABEL={pending:"Pending approval",approved:"Approved",voted:"Voted",locked:"Locked"};
 
-function renderAdmin(){store.load();renderResults();renderVoters();renderAudit()}
+function renderAdmin(){store.load();renderResults();renderVoters();renderCands();renderAudit()}
 
 function renderResults(){
  const t=CANDS.map(()=>0);mem.ledger.forEach(b=>{if(t[b.c]!==undefined)t[b.c]++});
@@ -594,6 +612,37 @@ $("vlist").addEventListener("click",async e=>{
  store.save();renderAdmin();
 });
 
+function renderCands(){
+ const locked=mem.ledger.length>0;
+ hide("cnd-lock",!locked);hide("cnd-form",locked);
+ $("clist").innerHTML=mem.cands.map((c,i)=>`<div class="vrow"><div><b>${i+1}. ${esc(c.n)}</b><div class="meta">${esc(c.p||"Independent")}</div></div><div class="acts">${locked?"":`<button class="btn sm dline" data-ci="${i}">Remove</button>`}</div></div>`).join("");
+}
+$("cadd").onclick=()=>{
+ const m=$("am");store.load();
+ if(mem.ledger.length)return renderAdmin();
+ const n=$("cn").value.trim().replace(/\s+/g," "),pt=$("cp").value.trim().replace(/\s+/g," ");
+ if(n.length<2)return msg(m,"Enter the candidate's name.","er");
+ if(mem.cands.length>=12)return msg(m,"The ballot can hold at most 12 candidates.","er");
+ if(mem.cands.some(c=>c.n.toLowerCase()===n.toLowerCase()))return msg(m,"This candidate is already on the ballot.","er");
+ const used=new Set(mem.cands.map(c=>c.c)),col=PALETTE.find(x=>!used.has(x))||PALETTE[mem.cands.length%PALETTE.length];
+ /* keep NOTA as the last option on the ballot */
+ const ni=mem.cands.findIndex(c=>c.n==="NOTA"),item={n,p:pt||"Independent",c:col};
+ if(ni>=0)mem.cands.splice(ni,0,item);else mem.cands.push(item);
+ CANDS=mem.cands;logE("Candidate added: "+n);store.save();
+ $("cn").value=$("cp").value="";renderAdmin();msg(m,n+" was added to the ballot.","ok");
+};
+enter(["cn","cp"],"cadd");
+$("clist").addEventListener("click",async e=>{
+ const b=e.target.closest("button[data-ci]");if(!b)return;
+ store.load();if(mem.ledger.length)return renderAdmin();
+ const i=+b.dataset.ci,c=mem.cands[i];if(!c)return renderAdmin();
+ if(mem.cands.length<=2)return msg($("am"),"The ballot needs at least 2 options.","er");
+ if(!(await ask({title:"Remove "+c.n+"?",body:"This candidate will no longer appear on the ballot.",ok:"Remove candidate",danger:true})))return;
+ store.load();if(mem.ledger.length)return renderAdmin();
+ const j=mem.cands.findIndex(x=>x.n===c.n);if(j<0)return renderAdmin();
+ mem.cands.splice(j,1);CANDS=mem.cands;logE("Candidate removed: "+c.n);store.save();renderAdmin();
+});
+
 async function renderAudit(){
  let ok=true,prev="0",bad=-1,n=0;
  for(const b of mem.ledger){if(b.i!==n||b.prev!==prev||b.hash!==await sha(b.i+"|"+b.c+"|"+b.ts+"|"+b.prev)){ok=false;bad=n;break}prev=b.hash;n++}
@@ -619,7 +668,7 @@ $("spgo").onclick=async()=>{
 };
 $("wipe").onclick=async()=>{
  if(!(await ask({title:"Erase all election data?",body:"Every voter, ballot and log entry will be deleted. This cannot be undone.",ok:"Erase everything",danger:true,pass:true})))return;
- store.load();const a=mem.admin;mem=fresh();mem.admin=a;logE("Election data erased");store.save();renderAdmin();msg($("am"),"Election data erased.","ok");
+ store.load();const a=mem.admin,cd=mem.cands;mem=fresh();mem.admin=a;mem.cands=cd;CANDS=cd;logE("Election data erased");store.save();renderAdmin();msg($("am"),"Election data erased.","ok");
 };
 
 /* ---------- confirm dialog ---------- */
