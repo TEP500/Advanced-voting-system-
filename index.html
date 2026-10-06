@@ -116,7 +116,7 @@ dialog h3{margin-top:0}
 <section id="reg" class="panel">
  <h2>Register to vote</h2>
  <p class="lead">An election officer approves each registration before you can vote.</p>
- <ol class="steps" id="rsteps"><li>Details</li><li>Authenticator</li><li>Face</li></ol>
+ <ol class="steps" id="rsteps"><li>Details</li><li>Face</li></ol>
 
  <div id="r1">
   <label for="rn">Full name</label><input id="rn" autocomplete="off">
@@ -124,13 +124,6 @@ dialog h3{margin-top:0}
   <label for="rp">Choose a 6-digit PIN</label><input id="rp" type="password" inputmode="numeric" maxlength="6" autocomplete="off">
   <label for="rp2">Confirm PIN</label><input id="rp2" type="password" inputmode="numeric" maxlength="6" autocomplete="off">
   <button class="btn block" id="r1go">Continue</button>
- </div>
-
- <div id="r2" class="hide">
-  <p>Add SecureVote to an authenticator app on your phone (Google Authenticator, Microsoft Authenticator or Authy) with this key. Then enter the 6-digit code the app shows.</p>
-  <div class="keybox" id="rkey"></div>
-  <label for="rc">Code from the app</label><input id="rc" class="code" inputmode="numeric" maxlength="6" autocomplete="off">
-  <button class="btn block" id="r2go">Check code</button>
  </div>
 
  <div id="r3" class="hide">
@@ -151,20 +144,14 @@ dialog h3{margin-top:0}
 <!-- VOTE -->
 <section id="vote" class="panel hide">
  <h2>Cast your vote</h2>
- <p class="lead">You will confirm your PIN, an authenticator code and your face before the ballot opens.</p>
+ <p class="lead">You will sign in with your PIN, confirm your face, and then authorize your vote with your PIN before it is recorded.</p>
  <p class="sess hide" id="sess">Time left: <b id="sleft"></b></p>
- <ol class="steps" id="vsteps"><li>Sign in</li><li>Code</li><li>Face</li><li>Ballot</li></ol>
+ <ol class="steps" id="vsteps"><li>Sign in</li><li>Face</li><li>Ballot</li><li>Authorize</li></ol>
 
  <div id="v1">
   <label for="vi">Voter ID</label><input id="vi" autocomplete="off" autocapitalize="characters">
   <label for="vp">PIN</label><input id="vp" type="password" inputmode="numeric" maxlength="6" autocomplete="off">
   <button class="btn block" id="v1go">Sign in</button>
- </div>
-
- <div id="v2" class="hide">
-  <label for="vc">Code from your authenticator app</label>
-  <input id="vc" class="code" inputmode="numeric" maxlength="6" autocomplete="off">
-  <button class="btn block" id="v2go">Check code</button>
  </div>
 
  <div id="v3" class="hide">
@@ -181,8 +168,10 @@ dialog h3{margin-top:0}
   </div>
   <div id="vconf" class="hide">
    <div class="pick">You are voting for<br><b id="pickname"></b><br><span class="lead" id="pickparty"></span></div>
-   <p class="lead" style="margin-top:12px">Your vote cannot be changed after you confirm.</p>
-   <div class="row"><button class="btn line" id="vback">Change choice</button><button class="btn" id="vcast">Confirm vote</button></div>
+   <p class="lead" style="margin-top:12px">Authorize your vote. It cannot be changed after you confirm.</p>
+   <label for="va">Enter your PIN to authorize</label><input id="va" type="password" class="code" inputmode="numeric" maxlength="6" autocomplete="off">
+   <label style="display:flex;gap:10px;align-items:flex-start;margin-top:12px;font-weight:400"><input type="checkbox" id="vok" style="width:auto;margin-top:3px"><span>I confirm that I am the registered voter, that I am voting freely, and that I authorize this vote.</span></label>
+   <div class="row"><button class="btn line" id="vback">Change choice</button><button class="btn" id="vcast">Authorize and cast vote</button></div>
   </div>
  </div>
 
@@ -252,7 +241,7 @@ dialog h3{margin-top:0}
 </section>
 </main>
 
-<footer>Voters are checked by Voter ID and PIN, an authenticator code and a live face check, and must be approved by an election officer. Three failed attempts lock a voter until an officer unlocks them. Ballots are stored with no link to the voter.</footer>
+<footer>Voters are checked by Voter ID and PIN and a live face check, must be approved by an election officer, and authorize each vote with their PIN. Three failed attempts lock a voter until an officer unlocks them. Ballots are stored with no link to the voter.</footer>
 </div>
 
 <dialog id="dlg">
@@ -299,23 +288,6 @@ async function kdf(secret,salt){
  const k=await crypto.subtle.importKey("raw",new TextEncoder().encode(secret),"PBKDF2",false,["deriveBits"]);
  return b64(await crypto.subtle.deriveBits({name:"PBKDF2",salt:unb64(salt),iterations:150000,hash:"SHA-256"},k,256));
 }
-const B32="ABCDEFGHIJKLMNOPQRSTUVWXYZ234567";
-function b32enc(u){let bits=0,v=0,o="";for(const b of u){v=(v<<8)|b;bits+=8;while(bits>=5){o+=B32[(v>>>(bits-5))&31];bits-=5}v&=(1<<bits)-1}if(bits>0)o+=B32[(v<<(5-bits))&31];return o}
-function b32dec(s){let bits=0,v=0;const o=[];for(const ch of s.replace(/[\s=]/g,"").toUpperCase()){v=(v<<5)|B32.indexOf(ch);bits+=5;if(bits>=8){o.push((v>>>(bits-8))&255);bits-=8}v&=(1<<bits)-1}return new Uint8Array(o)}
-async function hotp(secret,counter){
- const key=await crypto.subtle.importKey("raw",secret,{name:"HMAC",hash:"SHA-1"},false,["sign"]);
- const buf=new ArrayBuffer(8);new DataView(buf).setUint32(4,counter);
- const h=new Uint8Array(await crypto.subtle.sign("HMAC",key,buf));
- const o=h[19]&15,n=((h[o]&127)<<24)|(h[o+1]<<16)|(h[o+2]<<8)|h[o+3];
- return String(n%1000000).padStart(6,"0");
-}
-/* returns the matched time step, or null. A step can be used only once (replay protection). */
-async function checkTotp(secretB32,code,lastStep){
- const now=Math.floor(Date.now()/30000),sec=b32dec(secretB32);
- for(const d of [0,-1,1]){const s=now+d;if(s<=lastStep)continue;if(await hotp(sec,s)===code)return s}
- return null;
-}
-
 /* ---------- camera, liveness, face ---------- */
 let stream=null;
 async function startCam(v){
@@ -371,11 +343,11 @@ const setSteps=(ol,n)=>[...ol.children].forEach((li,i)=>li.className=i+1<n?"done
 function enter(ids,btn){ids.forEach(i=>$(i).addEventListener("keydown",e=>{if(e.key==="Enter"){e.preventDefault();$(btn).click()}}))}
 const weakPin=p=>/^(\d)\1{5}$/.test(p)||"0123456789".includes(p)||"9876543210".includes(p);
 const digitsOnly=id=>$(id).addEventListener("input",e=>{e.target.value=e.target.value.replace(/\D/g,"")});
-["rp","rp2","rc","vp","vc"].forEach(digitsOnly);
+["rp","rp2","vp","va"].forEach(digitsOnly);
 
 /* ---------- registration ---------- */
 let RD=null;
-const rShow=n=>{[1,2,3,4].forEach(i=>hide("r"+i,i!==n));setSteps($("rsteps"),n)};
+const rShow=n=>{[1,3,4].forEach(i=>hide("r"+i,i!==n));setSteps($("rsteps"),n===1?1:n===3?2:3)};
 $("r1go").onclick=async()=>{
  const m=$("rm"),b=$("r1go");
  const name=$("rn").value.trim().replace(/\s+/g," "),id=$("ri").value.trim(),p=$("rp").value,p2=$("rp2").value;
@@ -389,19 +361,11 @@ $("r1go").onclick=async()=>{
   store.load();const k=await vkey(id);
   if(mem.voted.includes(k))return msg(m,"This Voter ID has already been used to vote.","er");
   if(mem.voters[k])return msg(m,"This Voter ID is already registered.","er");
-  const salt=b64(rnd(16)),secret=b32enc(rnd(20));
-  RD={name,id:id.toUpperCase(),k,salt,pin:await kdf(p,salt),secret};
-  $("rkey").textContent=secret.match(/.{4}/g).join(" ");
+  const salt=b64(rnd(16));
+  RD={name,id:id.toUpperCase(),k,salt,pin:await kdf(p,salt)};
   $("rp").value=$("rp2").value="";
-  msg(m,"");rShow(2);
+  msg(m,"");rShow(3);
  }finally{b.disabled=false}
-};
-$("r2go").onclick=async()=>{
- const m=$("rm"),c=$("rc").value;
- if(!RD||!/^\d{6}$/.test(c))return msg(m,"Enter the 6-digit code shown in the app.","er");
- const step=await checkTotp(RD.secret,c,0);
- if(step===null)return msg(m,"That code is not correct. Check the key in your app and try the new code.","er");
- RD.tc=step;$("rc").value="";msg(m,"Authenticator linked.","ok");rShow(3);
 };
 $("r3go").onclick=async()=>{
  const m=$("rm"),b=$("r3go"),v=$("rv");b.disabled=true;
@@ -413,22 +377,22 @@ $("r3go").onclick=async()=>{
   if(mem.voters[RD.k]||mem.voted.includes(RD.k))throw new Error("This Voter ID was registered while you were completing the check.");
   let dupOf=null,best=0;
   for(const [k,r] of Object.entries(mem.voters)){const s=cos(face,r.face);if(s>=FACE_DUP&&s>best){best=s;dupOf=k}}
-  mem.voters[RD.k]={name:RD.name,hint:RD.id.slice(-3),salt:RD.salt,pin:RD.pin,totp:RD.secret,tc:RD.tc,face,status:"pending",fails:0,locked:false,dupOf,created:Date.now()};
+  mem.voters[RD.k]={name:RD.name,hint:RD.id.slice(-3),salt:RD.salt,pin:RD.pin,face,status:"pending",fails:0,locked:false,dupOf,created:Date.now()};
   logE("Registration submitted by "+RD.name+(dupOf?" (face resembles an existing voter)":""));
   store.save();RD=null;stopCam();msg(m,"");rShow(4);
  }catch(e){stopCam();$("rhint").textContent="";msg(m,e.message,"er")}
  finally{b.disabled=false}
 };
 $("r4new").onclick=()=>{$("rn").value=$("ri").value="";msg($("rm"),"");rShow(1)};
-enter(["rn","ri","rp","rp2"],"r1go");enter(["rc"],"r2go");
+enter(["rn","ri","rp","rp2"],"r1go");
 
 /* ---------- voting ---------- */
 let S=null,vSel=null;
-const vShow=n=>{[1,2,3,4,5].forEach(i=>hide("v"+i,i!==n));setSteps($("vsteps"),Math.min(n,4));hide("vsteps",n===5)};
+const vShow=n=>{[1,3,4,5].forEach(i=>hide("v"+i,i!==n));setSteps($("vsteps"),n===1?1:n===3?2:3);hide("vsteps",n===5)};
 function closeSession(){if(S){clearInterval(S.tick);S=null}stopCam();hide("sess",true)}
 function endSession(text){
  closeSession();vSel=null;
- ["vi","vp","vc"].forEach(i=>$(i).value="");
+ ["vi","vp","va"].forEach(i=>$(i).value="");$("vok").checked=false;
  $("vhint").textContent="Position your face inside the outline.";
  hide("vb",false);hide("vconf",true);
  vShow(1);msg($("vm"),text||"",text?"er":"");
@@ -472,18 +436,9 @@ $("v1go").onclick=async()=>{
   }
   if(mem.voted.includes(k))return msg(m,"This voter has already voted.","er");
   if(r.status!=="approved")return msg(m,"This registration has not been approved yet. Please see an election officer.","er");
-  $("vp").value="";startSession(k);msg(m,"PIN accepted.","ok");vShow(2);$("vc").focus();
+  $("vp").value="";startSession(k);msg(m,"PIN accepted.","ok");vShow(3);
+  if(!(await startCam($("vv"))))msg(m,"The camera is blocked. Allow camera access and try again.","er");
  }finally{b.disabled=false}
-};
-$("v2go").onclick=async()=>{
- const m=$("vm"),c=$("vc").value;
- if(!/^\d{6}$/.test(c))return msg(m,"Enter the 6-digit code from your authenticator app.","er");
- const r=cur();if(!r)return;
- const step=await checkTotp(r.totp,c,r.tc||0);
- if(step===null){if(strike(r,"authenticator code"))return;return msg(m,"That code is not correct or has already been used. Wait for a new code. "+left(r),"er")}
- r.tc=step;store.save();$("vc").value="";
- vShow(3);msg(m,"Code accepted.","ok");
- if(!(await startCam($("vv"))))msg(m,"The camera is blocked. Allow camera access and try again.","er");
 };
 $("v3go").onclick=async()=>{
  const m=$("vm"),b=$("v3go");
@@ -508,11 +463,22 @@ function drawBallot(){
  document.querySelectorAll("input[name=cand]").forEach(x=>x.onchange=()=>{vSel=+x.value;$("review").disabled=false});
  vSel=null;$("review").disabled=true;hide("vb",false);hide("vconf",true);
 }
-$("review").onclick=()=>{if(vSel===null)return;$("pickname").textContent=CANDS[vSel].n;$("pickparty").textContent=CANDS[vSel].p;hide("vb",true);hide("vconf",false)};
-$("vback").onclick=()=>{hide("vb",false);hide("vconf",true)};
+$("review").onclick=()=>{if(vSel===null)return;setSteps($("vsteps"),4);$("va").value="";$("vok").checked=false;$("pickname").textContent=CANDS[vSel].n;$("pickparty").textContent=CANDS[vSel].p;hide("vb",true);hide("vconf",false)};
+$("vback").onclick=()=>{setSteps($("vsteps"),3);hide("vb",false);hide("vconf",true)};
 $("vcast").onclick=async()=>{
- const m=$("vm"),b=$("vcast");if(!S||vSel===null)return;b.disabled=true;
+ const m=$("vm"),b=$("vcast");if(!S||vSel===null)return;
+ const pin=$("va").value;
+ if(!/^\d{6}$/.test(pin))return msg(m,"Enter your 6-digit PIN to authorize your vote.","er");
+ if(!$("vok").checked)return msg(m,"Tick the box to confirm and authorize your vote.","er");
+ b.disabled=true;
  try{
+  const r0=cur();if(!r0)return;
+  if((await kdf(pin,r0.salt))!==r0.pin){
+   $("va").value="";
+   if(strike(r0,"vote authorization"))return;
+   return msg(m,"The PIN is not correct, so the vote was not authorized. "+left(r0),"er");
+  }
+  $("va").value="";
   const ts=Math.floor(Date.now()/60000)*60000;let hash=null;
   for(let t=0;t<3&&!hash;t++){
    if(!cur())return;
@@ -521,14 +487,14 @@ $("vcast").onclick=async()=>{
    store.load();
    if(mem.ledger.length!==idx)continue;
    if(!mem.voters[S.k]||mem.voted.includes(S.k))return endSession("This session is no longer valid. Please speak to an election officer.");
-   mem.ledger.push({i:idx,c:vSel,ts,prev,hash:h});mem.voted.push(S.k);store.save();hash=h;
+   mem.ledger.push({i:idx,c:vSel,ts,prev,hash:h});mem.voted.push(S.k);logE("A vote was authorized and recorded");store.save();hash=h;
   }
   if(!hash)return msg(m,"The vote could not be recorded. Please try again.","er");
   closeSession();vSel=null;$("rcpt").textContent=hash;vShow(5);msg(m,"");
  }finally{b.disabled=false}
 };
 $("vdone").onclick=()=>{endSession("");$("rcpt").textContent=""};
-enter(["vi","vp"],"v1go");enter(["vc"],"v2go");
+enter(["vi","vp"],"v1go");enter(["va"],"vcast");
 
 /* ---------- admin ---------- */
 let adminOK=false,idleT=null,vf="all";
