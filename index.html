@@ -1,4 +1,4 @@
-   <!DOCTYPE html>
+<!DOCTYPE html>
 <html lang="en"><head><meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
 <title>SecureVote</title>
@@ -227,6 +227,14 @@ dialog h3{margin-top:0}
 
   <div id="ap-set" class="hide">
    <h2>Settings</h2>
+   <h3>Candidates</h3>
+   <p class="lead" id="clead"></p>
+   <div id="clist"></div>
+   <div id="cform">
+    <label for="cn">Candidate name</label><input id="cn" autocomplete="off" maxlength="40">
+    <label for="cp">Party</label><input id="cp" autocomplete="off" maxlength="40" placeholder="Independent">
+    <button class="btn line block" id="cadd">Add candidate</button>
+   </div>
    <h3>Change passcode</h3>
    <label for="sp0">Current passcode</label><input id="sp0" type="password" autocomplete="current-password">
    <label for="sp1">New passcode</label><input id="sp1" type="password" autocomplete="new-password">
@@ -265,17 +273,22 @@ const msg=(el,t,k)=>{el.textContent=t||"";el.className="status "+(k||"")};
 const fmtDate=t=>new Date(t).toLocaleDateString(undefined,{day:"numeric",month:"short"});
 const fmtTime=t=>new Date(t).toLocaleString(undefined,{day:"numeric",month:"short",hour:"2-digit",minute:"2-digit"});
 
-const CANDS=[{n:"Aarav Sharma",p:"Unity Party",c:"#2f5bea"},{n:"Meera Iyer",p:"Progress Alliance",c:"#12a150"},{n:"Rohan Das",p:"People's Front",c:"#d97706"},{n:"NOTA",p:"None of the above",c:"#667085"}];
+const DEFAULT_CANDS=[{n:"Aarav Sharma",p:"Unity Party",c:"#2f5bea"},{n:"Meera Iyer",p:"Progress Alliance",c:"#12a150"},{n:"Rohan Das",p:"People's Front",c:"#d97706"},{n:"NOTA",p:"None of the above",c:"#667085"}];
+const CAND_COLORS=["#7c3aed","#db2777","#0891b2","#65a30d","#b45309","#475569","#0d9488","#c2410c"],MAX_CANDS=12;
+const CANDS=[];
+const syncCands=()=>{CANDS.length=0;CANDS.push(...mem.cands)};
 const MAX_FAILS=3, SESSION_MS=240000, IDLE_MS=600000, LIVE_MIN=5, FACE_MATCH=0.8, FACE_DUP=0.8;
 
 /* ---------- storage ---------- */
 const KEY="securevote.v2";
 let mem=null,persistOK=true;
-const fresh=()=>({salt:b64(rnd(16)),voters:{},voted:[],blocked:[],ledger:[],admin:null,log:[]});
+const fresh=()=>({salt:b64(rnd(16)),cands:DEFAULT_CANDS.map(c=>({...c})),voters:{},voted:[],blocked:[],ledger:[],admin:null,log:[]});
 const store={
  load(){let r=null;try{r=localStorage.getItem(KEY)}catch(e){persistOK=false}
   if(r){try{const m=JSON.parse(r);if(m&&m.voters&&m.ledger)mem=m}catch(e){}}
-  if(!mem)mem=fresh()},
+  if(!mem)mem=fresh();
+  if(!Array.isArray(mem.cands)||!mem.cands.length)mem.cands=DEFAULT_CANDS.map(c=>({...c}));
+  syncCands()},
  save(){mem.voted.sort();try{localStorage.setItem(KEY,JSON.stringify(mem));persistOK=true}catch(e){persistOK=false}
   hide("warn",persistOK);return persistOK}
 };
@@ -565,7 +578,36 @@ document.querySelectorAll("#subtabs button").forEach(b=>b.onclick=()=>{showSub(b
 const state=(k,r)=>mem.voted.includes(k)?"voted":r.locked?"locked":r.status==="approved"?"approved":"pending";
 const LABEL={pending:"Pending approval",approved:"Approved",voted:"Voted",locked:"Locked"};
 
-function renderAdmin(){store.load();renderResults();renderVoters();renderAudit()}
+function renderAdmin(){store.load();renderResults();renderVoters();renderAudit();renderCands()}
+
+function renderCands(){
+ const locked=mem.ledger.length>0;
+ $("clead").textContent=locked?"Voting has started, so the candidate list is locked to keep the ballots consistent.":"These candidates appear on the ballot. You can add or remove candidates until the first vote is cast.";
+ hide("cform",locked);
+ $("clist").innerHTML=mem.cands.map((c,i)=>`<div class="vrow"><div><b>${esc(c.n)}</b><div class="meta">${esc(c.p)}</div></div>${locked||c.n==="NOTA"?"":`<div class="acts"><button class="btn sm dline" data-ci="${i}">Remove</button></div>`}</div>`).join("");
+}
+$("clist").addEventListener("click",async e=>{
+ const b=e.target.closest("button[data-ci]");if(!b)return;
+ store.load();const c=mem.cands[+b.dataset.ci];
+ if(!c||mem.ledger.length)return renderAdmin();
+ if(!(await ask({title:"Remove "+c.n+"?",body:"This candidate will be taken off the ballot.",ok:"Remove candidate",danger:true})))return;
+ store.load();if(mem.ledger.length)return renderAdmin();
+ mem.cands=mem.cands.filter(x=>x.n!==c.n);logE("Candidate removed: "+c.n);store.save();syncCands();renderAdmin();
+});
+$("cadd").onclick=()=>{
+ const m=$("am"),n=$("cn").value.trim().replace(/\s+/g," "),p=$("cp").value.trim().replace(/\s+/g," ")||"Independent";
+ store.load();
+ if(mem.ledger.length)return msg(m,"Voting has started, so candidates can no longer be added.","er");
+ if(n.length<2)return msg(m,"Enter the candidate's name.","er");
+ if(mem.cands.length>=MAX_CANDS)return msg(m,"The ballot can have at most "+MAX_CANDS+" entries.","er");
+ if(mem.cands.some(c=>c.n.toLowerCase()===n.toLowerCase()))return msg(m,"This candidate is already on the ballot.","er");
+ const c={n,p,c:CAND_COLORS[mem.cands.length%CAND_COLORS.length]};
+ const nota=mem.cands.findIndex(x=>x.n==="NOTA");
+ if(nota>=0)mem.cands.splice(nota,0,c);else mem.cands.push(c);
+ logE("Candidate added: "+n+" ("+p+")");store.save();syncCands();
+ $("cn").value=$("cp").value="";renderAdmin();msg(m,n+" was added to the ballot.","ok");
+};
+enter(["cn","cp"],"cadd");
 
 function renderResults(){
  const t=CANDS.map(()=>0);mem.ledger.forEach(b=>{if(t[b.c]!==undefined)t[b.c]++});
@@ -664,3 +706,4 @@ function ask({title,body,ok,danger,pass}){
 
 rShow(1);vShow(1);
 </script></body></html>
+
