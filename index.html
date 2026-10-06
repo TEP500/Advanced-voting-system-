@@ -129,7 +129,6 @@ dialog h3{margin-top:0}
  <div id="r2" class="hide">
   <p>Add SecureVote to an authenticator app on your phone (Google Authenticator, Microsoft Authenticator or Authy) with this key. Then enter the 6-digit code the app shows.</p>
   <div class="keybox" id="rkey"></div>
-  <p class="lead" style="margin-top:8px"><a id="rlink" href="#" style="color:var(--accent)">Open in authenticator app</a></p>
   <label for="rc">Code from the app</label><input id="rc" class="code" inputmode="numeric" maxlength="6" autocomplete="off">
   <button class="btn block" id="r2go">Check code</button>
  </div>
@@ -393,7 +392,6 @@ $("r1go").onclick=async()=>{
   const salt=b64(rnd(16)),secret=b32enc(rnd(20));
   RD={name,id:id.toUpperCase(),k,salt,pin:await kdf(p,salt),secret};
   $("rkey").textContent=secret.match(/.{4}/g).join(" ");
-  $("rlink").href="otpauth://totp/SecureVote:"+encodeURIComponent(RD.id)+"?secret="+secret+"&issuer=SecureVote";
   $("rp").value=$("rp2").value="";
   msg(m,"");rShow(2);
  }finally{b.disabled=false}
