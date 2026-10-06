@@ -1,4 +1,4 @@
-<!DOCTYPE html>
+   <!DOCTYPE html>
 <html lang="en"><head><meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
 <title>SecureVote</title>
@@ -115,7 +115,7 @@ dialog h3{margin-top:0}
 <!-- REGISTER -->
 <section id="reg" class="panel">
  <h2>Register to vote</h2>
- <p class="lead">An election officer approves each registration before you can vote.</p>
+ <p class="lead">One face can be registered only once. An election officer approves each registration before you can vote.</p>
  <ol class="steps" id="rsteps"><li>Details</li><li>Face</li></ol>
 
  <div id="r1">
@@ -203,7 +203,7 @@ dialog h3{margin-top:0}
 
  <div id="a-dash" class="hide">
   <div class="atop">
-   <div class="sub" id="subtabs"><button class="on" data-s="res">Results</button><button data-s="vot">Voters</button><button data-s="cnd">Candidates</button><button data-s="aud">Audit</button><button data-s="set">Settings</button></div>
+   <div class="sub" id="subtabs"><button class="on" data-s="res">Results</button><button data-s="vot">Voters</button><button data-s="aud">Audit</button><button data-s="set">Settings</button></div>
    <button class="btn line sm" id="aout">Sign out</button>
   </div>
 
@@ -215,19 +215,6 @@ dialog h3{margin-top:0}
    <input id="vq" type="search" placeholder="Search by name or Voter ID" autocomplete="off">
    <div class="seg" id="seg"></div>
    <div id="vlist"></div>
-  </div>
-
-  <div id="ap-cnd" class="hide">
-   <h2>Candidates</h2>
-   <p class="lead">Add the participants who will appear on the ballot. Candidates can be added or removed only before the first vote is cast.</p>
-   <div id="cnd-lock" class="status er hide">Voting has started, so the candidate list is locked. Erase election data in Settings to start a new election.</div>
-   <div id="cnd-form">
-    <label for="cn">Candidate name</label><input id="cn" maxlength="40" autocomplete="off">
-    <label for="cp">Party or group</label><input id="cp" maxlength="40" autocomplete="off">
-    <button class="btn block" id="cadd">Add candidate</button>
-   </div>
-   <h3>On the ballot</h3>
-   <div id="clist"></div>
   </div>
 
   <div id="ap-aud" class="hide"><div id="aud-body"></div>
@@ -278,21 +265,17 @@ const msg=(el,t,k)=>{el.textContent=t||"";el.className="status "+(k||"")};
 const fmtDate=t=>new Date(t).toLocaleDateString(undefined,{day:"numeric",month:"short"});
 const fmtTime=t=>new Date(t).toLocaleString(undefined,{day:"numeric",month:"short",hour:"2-digit",minute:"2-digit"});
 
-const DEFAULT_C=[{n:"Aarav Sharma",p:"Unity Party",c:"#2f5bea"},{n:"Meera Iyer",p:"Progress Alliance",c:"#12a150"},{n:"Rohan Das",p:"People's Front",c:"#d97706"},{n:"NOTA",p:"None of the above",c:"#667085"}];
-let CANDS=DEFAULT_C.map(x=>({...x}));
-const PALETTE=["#2f5bea","#12a150","#d97706","#c2255c","#7048e8","#0c8599","#e8590c","#5c940d"];
-const MAX_FAILS=3, SESSION_MS=240000, IDLE_MS=600000, LIVE_MIN=5, FACE_MATCH=0.8, FACE_DUP=0.9;
+const CANDS=[{n:"Aarav Sharma",p:"Unity Party",c:"#2f5bea"},{n:"Meera Iyer",p:"Progress Alliance",c:"#12a150"},{n:"Rohan Das",p:"People's Front",c:"#d97706"},{n:"NOTA",p:"None of the above",c:"#667085"}];
+const MAX_FAILS=3, SESSION_MS=240000, IDLE_MS=600000, LIVE_MIN=5, FACE_MATCH=0.8, FACE_DUP=0.8;
 
 /* ---------- storage ---------- */
 const KEY="securevote.v2";
 let mem=null,persistOK=true;
-const fresh=()=>({salt:b64(rnd(16)),voters:{},voted:[],ledger:[],admin:null,log:[],cands:DEFAULT_C.map(x=>({...x}))});
+const fresh=()=>({salt:b64(rnd(16)),voters:{},voted:[],blocked:[],ledger:[],admin:null,log:[]});
 const store={
  load(){let r=null;try{r=localStorage.getItem(KEY)}catch(e){persistOK=false}
   if(r){try{const m=JSON.parse(r);if(m&&m.voters&&m.ledger)mem=m}catch(e){}}
-  if(!mem)mem=fresh();
-  if(!Array.isArray(mem.cands)||mem.cands.length<2)mem.cands=DEFAULT_C.map(x=>({...x}));
-  CANDS=mem.cands},
+  if(!mem)mem=fresh()},
  save(){mem.voted.sort();try{localStorage.setItem(KEY,JSON.stringify(mem));persistOK=true}catch(e){persistOK=false}
   hide("warn",persistOK);return persistOK}
 };
@@ -332,6 +315,19 @@ async function faceVec(v){
  return z.map(a=>+(a/n).toFixed(4));
 }
 const cos=(a,b)=>a.reduce((s,v,i)=>s+v*b[i],0);
+/* Finds an existing voter whose face matches. votedOnly limits the search to voters who already voted.
+   mem.blocked keeps the faces of removed voters who had already voted, so removal cannot be used to vote again. */
+function findDupFace(face,skipK,votedOnly){
+ let hit=null,best=0;
+ for(const [k,r] of Object.entries(mem.voters)){
+  if(k===skipK||!r.face||(votedOnly&&!mem.voted.includes(k)))continue;
+  const s=cos(face,r.face);if(s>=FACE_DUP&&s>best){best=s;hit=k}
+ }
+ if(hit)return{name:mem.voters[hit].name};
+ for(const f of (mem.blocked||[]))if(cos(face,f)>=FACE_DUP)return{name:"a removed voter who had already voted"};
+ return null;
+}
+const DUP_MSG="Warning: this face is already registered. You are trying to register or vote more than once, which is not allowed. This attempt has been blocked and recorded for the election officer.";
 /* Liveness: the person must turn their head, which a held-up photo cannot do. Then a straight-on capture is taken. */
 async function faceCheck(v,hint){
  hint.textContent="Turn your head slowly left, then right.";
@@ -392,10 +388,14 @@ $("r3go").onclick=async()=>{
   const face=await faceCheck(v,$("rhint"));
   store.load();
   if(mem.voters[RD.k]||mem.voted.includes(RD.k))throw new Error("This Voter ID was registered while you were completing the check.");
-  let dupOf=null,best=0;
-  for(const [k,r] of Object.entries(mem.voters)){const s=cos(face,r.face);if(s>=FACE_DUP&&s>best){best=s;dupOf=k}}
-  mem.voters[RD.k]={name:RD.name,hint:RD.id.slice(-3),salt:RD.salt,pin:RD.pin,face,status:"pending",fails:0,locked:false,dupOf,created:Date.now()};
-  logE("Registration submitted by "+RD.name+(dupOf?" (face resembles an existing voter)":""));
+  const dup=findDupFace(face,null,false);
+  if(dup){
+   logE("Duplicate registration blocked: "+RD.name+" (ID ending "+RD.id.slice(-3)+") tried to register a face already on file for "+dup.name);
+   store.save();RD=null;stopCam();$("rhint").textContent="";$("rn").value=$("ri").value="";rShow(1);
+   return msg(m,DUP_MSG,"er");
+  }
+  mem.voters[RD.k]={name:RD.name,hint:RD.id.slice(-3),salt:RD.salt,pin:RD.pin,face,status:"pending",fails:0,locked:false,dupOf:null,created:Date.now()};
+  logE("Registration submitted by "+RD.name);
   store.save();RD=null;stopCam();msg(m,"");rShow(4);
  }catch(e){stopCam();$("rhint").textContent="";msg(m,e.message,"er")}
  finally{b.disabled=false}
@@ -404,7 +404,7 @@ $("r4new").onclick=()=>{$("rn").value=$("ri").value="";msg($("rm"),"");rShow(1)}
 enter(["rn","ri","rp","rp2"],"r1go");
 
 /* ---------- voting ---------- */
-let S=null,vSel=null,vPick=null;
+let S=null,vSel=null;
 const vShow=n=>{[1,3,4,5].forEach(i=>hide("v"+i,i!==n));setSteps($("vsteps"),n===1?1:n===3?2:3);hide("vsteps",n===5)};
 function closeSession(){if(S){clearInterval(S.tick);S=null}stopCam();hide("sess",true)}
 function endSession(text){
@@ -471,6 +471,11 @@ $("v3go").onclick=async()=>{
   if(s<FACE_MATCH){$("vhint").textContent="Position your face inside the outline.";
    if(strike(r,"face check"))return;
    return msg(m,"Your face did not match ("+Math.round(s*100)+"%). Use similar lighting to registration. "+left(r),"er")}
+  const dup=findDupFace(face,S.k,true);
+  if(dup){
+   logE("Duplicate vote attempt blocked: "+r.name+" (ID ending "+r.hint+") matched the face of "+dup.name+", who already voted");
+   store.save();return endSession(DUP_MSG);
+  }
   r.fails=0;store.save();stopCam();
   drawBallot();vShow(4);msg(m,"Identity confirmed. Choose your candidate.","ok");
  }finally{b.disabled=false}
@@ -480,7 +485,7 @@ function drawBallot(){
  document.querySelectorAll("input[name=cand]").forEach(x=>x.onchange=()=>{vSel=+x.value;$("review").disabled=false});
  vSel=null;$("review").disabled=true;hide("vb",false);hide("vconf",true);
 }
-$("review").onclick=()=>{if(vSel===null)return;setSteps($("vsteps"),4);$("va").value="";$("vok").checked=false;vPick=CANDS[vSel].n;$("pickname").textContent=CANDS[vSel].n;$("pickparty").textContent=CANDS[vSel].p;hide("vb",true);hide("vconf",false)};
+$("review").onclick=()=>{if(vSel===null)return;setSteps($("vsteps"),4);$("va").value="";$("vok").checked=false;$("pickname").textContent=CANDS[vSel].n;$("pickparty").textContent=CANDS[vSel].p;hide("vb",true);hide("vconf",false)};
 $("vback").onclick=()=>{setSteps($("vsteps"),3);hide("vb",false);hide("vconf",true)};
 $("vcast").onclick=async()=>{
  const m=$("vm"),b=$("vcast");if(!S||vSel===null)return;
@@ -499,7 +504,6 @@ $("vcast").onclick=async()=>{
   const ts=Math.floor(Date.now()/60000)*60000;let hash=null;
   for(let t=0;t<3&&!hash;t++){
    if(!cur())return;
-   if(!CANDS[vSel]||CANDS[vSel].n!==vPick)return endSession("The candidate list changed. Please sign in and vote again.");
    const idx=mem.ledger.length,prev=idx?mem.ledger[idx-1].hash:"0";
    const h=await sha(idx+"|"+vSel+"|"+ts+"|"+prev);
    store.load();
@@ -555,13 +559,13 @@ $("aout").onclick=()=>{adminOut();adminRoute()};
 
 function showSub(s){
  document.querySelectorAll("#subtabs button").forEach(b=>b.classList.toggle("on",b.dataset.s===s));
- ["res","vot","cnd","aud","set"].forEach(x=>hide("ap-"+x,x!==s));msg($("am"),"");
+ ["res","vot","aud","set"].forEach(x=>hide("ap-"+x,x!==s));msg($("am"),"");
 }
 document.querySelectorAll("#subtabs button").forEach(b=>b.onclick=()=>{showSub(b.dataset.s);renderAdmin()});
 const state=(k,r)=>mem.voted.includes(k)?"voted":r.locked?"locked":r.status==="approved"?"approved":"pending";
 const LABEL={pending:"Pending approval",approved:"Approved",voted:"Voted",locked:"Locked"};
 
-function renderAdmin(){store.load();renderResults();renderVoters();renderCands();renderAudit()}
+function renderAdmin(){store.load();renderResults();renderVoters();renderAudit()}
 
 function renderResults(){
  const t=CANDS.map(()=>0);mem.ledger.forEach(b=>{if(t[b.c]!==undefined)t[b.c]++});
@@ -605,42 +609,11 @@ $("vlist").addEventListener("click",async e=>{
  }else if(a==="unlock"){r.locked=false;r.fails=0;logE("Unlocked "+r.name)}
  else if(a==="remove"){
   const voted=mem.voted.includes(k);
-  const body=voted?"This voter has already voted. Their ballot stays in the count because ballots are anonymous, and this ID can never be used to vote again.":"This voter will be deleted and cannot vote. They can register again later.";
+  const body=voted?"This voter has already voted. Their ballot stays in the count because ballots are anonymous, and neither this ID nor this face can be used to vote again.":"This voter will be deleted and cannot vote. They can register again later.";
   if(!(await ask({title:"Remove "+r.name+"?",body,ok:"Remove voter",danger:true})))return;
-  store.load();delete mem.voters[k];logE("Removed "+r.name+(voted?" (had already voted)":""));
+  store.load();const rr=mem.voters[k];if(voted&&rr&&rr.face)(mem.blocked=mem.blocked||[]).push(rr.face);delete mem.voters[k];logE("Removed "+r.name+(voted?" (had already voted)":""));
  }
  store.save();renderAdmin();
-});
-
-function renderCands(){
- const locked=mem.ledger.length>0;
- hide("cnd-lock",!locked);hide("cnd-form",locked);
- $("clist").innerHTML=mem.cands.map((c,i)=>`<div class="vrow"><div><b>${i+1}. ${esc(c.n)}</b><div class="meta">${esc(c.p||"Independent")}</div></div><div class="acts">${locked?"":`<button class="btn sm dline" data-ci="${i}">Remove</button>`}</div></div>`).join("");
-}
-$("cadd").onclick=()=>{
- const m=$("am");store.load();
- if(mem.ledger.length)return renderAdmin();
- const n=$("cn").value.trim().replace(/\s+/g," "),pt=$("cp").value.trim().replace(/\s+/g," ");
- if(n.length<2)return msg(m,"Enter the candidate's name.","er");
- if(mem.cands.length>=12)return msg(m,"The ballot can hold at most 12 candidates.","er");
- if(mem.cands.some(c=>c.n.toLowerCase()===n.toLowerCase()))return msg(m,"This candidate is already on the ballot.","er");
- const used=new Set(mem.cands.map(c=>c.c)),col=PALETTE.find(x=>!used.has(x))||PALETTE[mem.cands.length%PALETTE.length];
- /* keep NOTA as the last option on the ballot */
- const ni=mem.cands.findIndex(c=>c.n==="NOTA"),item={n,p:pt||"Independent",c:col};
- if(ni>=0)mem.cands.splice(ni,0,item);else mem.cands.push(item);
- CANDS=mem.cands;logE("Candidate added: "+n);store.save();
- $("cn").value=$("cp").value="";renderAdmin();msg(m,n+" was added to the ballot.","ok");
-};
-enter(["cn","cp"],"cadd");
-$("clist").addEventListener("click",async e=>{
- const b=e.target.closest("button[data-ci]");if(!b)return;
- store.load();if(mem.ledger.length)return renderAdmin();
- const i=+b.dataset.ci,c=mem.cands[i];if(!c)return renderAdmin();
- if(mem.cands.length<=2)return msg($("am"),"The ballot needs at least 2 options.","er");
- if(!(await ask({title:"Remove "+c.n+"?",body:"This candidate will no longer appear on the ballot.",ok:"Remove candidate",danger:true})))return;
- store.load();if(mem.ledger.length)return renderAdmin();
- const j=mem.cands.findIndex(x=>x.n===c.n);if(j<0)return renderAdmin();
- mem.cands.splice(j,1);CANDS=mem.cands;logE("Candidate removed: "+c.n);store.save();renderAdmin();
 });
 
 async function renderAudit(){
@@ -668,7 +641,7 @@ $("spgo").onclick=async()=>{
 };
 $("wipe").onclick=async()=>{
  if(!(await ask({title:"Erase all election data?",body:"Every voter, ballot and log entry will be deleted. This cannot be undone.",ok:"Erase everything",danger:true,pass:true})))return;
- store.load();const a=mem.admin,cd=mem.cands;mem=fresh();mem.admin=a;mem.cands=cd;CANDS=cd;logE("Election data erased");store.save();renderAdmin();msg($("am"),"Election data erased.","ok");
+ store.load();const a=mem.admin;mem=fresh();mem.admin=a;logE("Election data erased");store.save();renderAdmin();msg($("am"),"Election data erased.","ok");
 };
 
 /* ---------- confirm dialog ---------- */
