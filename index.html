@@ -1,4 +1,5 @@
-            <!DOCTYPE html>
+    
+<!DOCTYPE html>
 <html lang="en"><head><meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
 <title>SecureVote</title>
@@ -301,4 +302,520 @@ const fmtDate=t=>new Date(t).toLocaleDateString(undefined,{day:"numeric",month:"
 const fmtTime=t=>new Date(t).toLocaleString(undefined,{day:"numeric",month:"short",hour:"2-digit",minute:"2-digit"});
 
 const DEFAULT_CANDS=[{n:"Aarav Sharma",p:"Unity Party",c:"#2f5bea"},{n:"Meera Iyer",p:"Progress Alliance",c:"#12a150"},{n:"Rohan Das",p:"People's Front",c:"#d97706"},{n:"NOTA",p:"None of the above",c:"#667085"}];
-const CAND_COLORS=["#7c3aed","#db2777","#0891b2","#65a30d","#b45309","#47556
+const CAND_COLORS=["#7c3aed","#db2777","#0891b2","#65a30d","#b45309","#475569","#0d9488","#c2410c"],MAX_CANDS=12;
+const CANDS=[];
+const syncCands=()=>{CANDS.length=0;CANDS.push(...mem.cands)};
+const MAX_FAILS=3, SESSION_MS=240000, IDLE_MS=600000, LIVE_MIN=5, FACE_MATCH=0.8, FACE_DUP=0.8;
+
+/* ---------- storage ---------- */
+const KEY="securevote.v2";
+let mem=null,persistOK=true;
+const fresh=()=>({salt:b64(rnd(16)),cands:DEFAULT_CANDS.map(c=>({...c})),voters:{},voted:[],blocked:[],ledger:[],admin:null,log:[]});
+const WARN0="Browser storage is unavailable, so registrations and votes will be lost when this page closes.";
+const WARN1="Cannot reach the shared database. Changes are kept on this device only and will not appear on other devices.";
+const cloudOn=!!(FIREBASE_CONFIG&&FIREBASE_CONFIG.apiKey&&FIREBASE_CONFIG.projectId);
+let cloudReady=false,cloudWait=cloudOn,cloudErr=false,cloudRef=null,cloudT=null,cloudLast="";
+function updateWarn(){
+ const w=$("warn");
+ if(cloudOn){w.textContent=WARN1;hide("warn",!cloudErr)}
+ else{w.textContent=WARN0;hide("warn",persistOK)}
+}
+function cloudPush(){
+ if(!cloudOn||!cloudReady||!cloudRef)return;
+ clearTimeout(cloudT);
+ cloudT=setTimeout(()=>{
+  const raw=JSON.stringify(mem);cloudLast=raw;
+  cloudRef.set({json:raw,updated:Date.now()})
+   .then(()=>{if(cloudErr){cloudErr=false;updateWarn()}})
+   .catch(()=>{cloudErr=true;updateWarn()});
+ },250);
+}
+const store={
+ load(){let r=null;try{r=localStorage.getItem(KEY)}catch(e){persistOK=false}
+  if(r){try{const m=JSON.parse(r);if(m&&m.voters&&m.ledger)mem=m}catch(e){}}
+  if(!mem)mem=fresh();
+  if(!Array.isArray(mem.cands)||!mem.cands.length)mem.cands=DEFAULT_CANDS.map(c=>({...c}));
+  syncCands()},
+ save(){mem.voted.sort();try{localStorage.setItem(KEY,JSON.stringify(mem));persistOK=true}catch(e){persistOK=false}
+  updateWarn();cloudPush();return persistOK}
+};
+store.load();store.save();
+const logE=t=>{mem.log.unshift({t:Date.now(),m:t});if(mem.log.length>200)mem.log.length=200};
+const vkey=id=>sha(mem.salt+"|"+id.trim().toUpperCase().replace(/\s+/g,""));
+
+/* ---------- crypto helpers ---------- */
+async function kdf(secret,salt){
+ const k=await crypto.subtle.importKey("raw",new TextEncoder().encode(secret),"PBKDF2",false,["deriveBits"]);
+ return b64(await crypto.subtle.deriveBits({name:"PBKDF2",salt:unb64(salt),iterations:150000,hash:"SHA-256"},k,256));
+}
+/* ---------- camera, liveness, face ---------- */
+let stream=null;
+async function startCam(v){
+ try{stream=await navigator.mediaDevices.getUserMedia({video:{facingMode:"user",width:640,height:480}});
+  v.srcObject=stream;await v.play();v.parentElement.classList.remove("hide");return true}
+ catch(e){return false}
+}
+function stopCam(){if(stream){stream.getTracks().forEach(t=>t.stop());stream=null}
+ document.querySelectorAll("video").forEach(v=>{v.srcObject=null});
+ hide("rcam",true)}
+function grab(v,n){
+ const c=document.createElement("canvas");c.width=c.height=n;
+ const x=c.getContext("2d",{willReadFrequently:true}),s=Math.min(v.videoWidth,v.videoHeight);
+ x.drawImage(v,(v.videoWidth-s)/2,(v.videoHeight-s)/2,s,s,0,0,n,n);
+ const d=x.getImageData(0,0,n,n).data,g=new Float32Array(n*n);
+ for(let i=0;i<g.length;i++)g[i]=.299*d[i*4]+.587*d[i*4+1]+.114*d[i*4+2];
+ return g;
+}
+async function faceVec(v){
+ if("FaceDetector" in window){let f=null;try{f=await new FaceDetector({fastMode:true}).detect(v)}catch(e){}
+  if(f&&!f.length)throw new Error("No face detected. Face the camera in good light.")}
+ const g=grab(v,24);let m=0;for(const a of g)m+=a;m/=g.length;
+ const z=Array.from(g,a=>a-m),n=Math.hypot(...z)||1;
+ if(n/Math.sqrt(z.length)<8)throw new Error("The image is too dark, or the camera is covered.");
+ return z.map(a=>+(a/n).toFixed(4));
+}
+const cos=(a,b)=>a.reduce((s,v,i)=>s+v*b[i],0);
+/* Finds an existing voter whose face matches. votedOnly limits the search to voters who already voted.
+   mem.blocked keeps the faces of removed voters who had already voted, so removal cannot be used to vote again. */
+function findDupFace(face,skipK,votedOnly){
+ let hit=null,best=0;
+ for(const [k,r] of Object.entries(mem.voters)){
+  if(k===skipK||!r.face||(votedOnly&&!mem.voted.includes(k)))continue;
+  const s=cos(face,r.face);if(s>=FACE_DUP&&s>best){best=s;hit=k}
+ }
+ if(hit)return{name:mem.voters[hit].name};
+ for(const f of (mem.blocked||[]))if(cos(face,f)>=FACE_DUP)return{name:"a removed voter who had already voted"};
+ return null;
+}
+const DUP_MSG="Warning: this face is already registered. You are trying to register or vote more than once, which is not allowed. This attempt has been blocked and recorded for the election officer.";
+/* Liveness: the person must turn their head, which a held-up photo cannot do. Then a straight-on capture is taken. */
+async function faceCheck(v,hint){
+ hint.textContent="Turn your head slowly left, then right.";
+ const fr=[],t0=performance.now();
+ while(performance.now()-t0<3200){fr.push(grab(v,24));await sleep(150)}
+ let mx=0;
+ for(let i=0;i<fr.length;i++)for(let j=i+1;j<fr.length;j++){let s=0;for(let k=0;k<fr[i].length;k++)s+=Math.abs(fr[i][k]-fr[j][k]);mx=Math.max(mx,s/fr[i].length)}
+ if(mx<LIVE_MIN){hint.textContent="";throw new Error("No head movement was detected. Try again and turn your head slowly.")}
+ hint.textContent="Now look straight at the camera and hold still.";
+ await sleep(1600);
+ const f=await faceVec(v);hint.textContent="";return f;
+}
+
+/* ---------- tabs ---------- */
+let tab="reg";
+document.querySelectorAll("nav button").forEach(b=>b.onclick=()=>{
+ const t=b.dataset.t;if(t===tab)return;
+ if(tab==="admin")adminOut();
+ if(tab==="vote")endSession("");
+ stopCam();tab=t;
+ document.querySelectorAll("nav button").forEach(x=>x.classList.toggle("on",x===b));
+ ["reg","vote","admin"].forEach(id=>hide(id,id!==t));
+ if(t==="admin")adminRoute();
+});
+const setSteps=(ol,n)=>[...ol.children].forEach((li,i)=>li.className=i+1<n?"done":i+1===n?"cur":"");
+function enter(ids,btn){ids.forEach(i=>$(i).addEventListener("keydown",e=>{if(e.key==="Enter"){e.preventDefault();$(btn).click()}}))}
+const weakPin=p=>/^(\d)\1{5}$/.test(p)||"0123456789".includes(p)||"9876543210".includes(p);
+const digitsOnly=id=>$(id).addEventListener("input",e=>{e.target.value=e.target.value.replace(/\D/g,"")});
+["rp","rp2","vp","va"].forEach(digitsOnly);
+
+/* ---------- registration ---------- */
+let RD=null;
+const rShow=n=>{[1,3,4].forEach(i=>hide("r"+i,i!==n));setSteps($("rsteps"),n===1?1:n===3?2:3)};
+$("r1go").onclick=async()=>{
+ const m=$("rm"),b=$("r1go");
+ const name=$("rn").value.trim().replace(/\s+/g," "),id=$("ri").value.trim(),p=$("rp").value,p2=$("rp2").value;
+ if(name.length<2)return msg(m,"Enter your full name.","er");
+ if(!/^[A-Za-z0-9\-\/]{4,20}$/.test(id))return msg(m,"Voter ID must be 4 to 20 letters, digits, hyphens or slashes.","er");
+ if(!/^\d{6}$/.test(p))return msg(m,"The PIN must be exactly 6 digits.","er");
+ if(weakPin(p))return msg(m,"Choose a PIN that is not a repeated or sequential number.","er");
+ if(p!==p2)return msg(m,"The two PINs do not match.","er");
+ b.disabled=true;
+ try{
+  store.load();const k=await vkey(id);
+  if(mem.voted.includes(k))return msg(m,"This Voter ID has already been used to vote.","er");
+  if(mem.voters[k])return msg(m,"This Voter ID is already registered.","er");
+  const salt=b64(rnd(16));
+  RD={name,id:id.toUpperCase(),k,salt,pin:await kdf(p,salt)};
+  $("rp").value=$("rp2").value="";
+  msg(m,"");rShow(3);
+ }finally{b.disabled=false}
+};
+$("r3go").onclick=async()=>{
+ const m=$("rm"),b=$("r3go"),v=$("rv");b.disabled=true;
+ try{
+  if(!(await startCam(v)))throw new Error("The camera is blocked. Allow camera access (the page must use HTTPS) and try again.");
+  msg(m,"");$("rhint").textContent="Get ready.";await sleep(1200);
+  const face=await faceCheck(v,$("rhint"));
+  store.load();
+  if(mem.voters[RD.k]||mem.voted.includes(RD.k))throw new Error("This Voter ID was registered while you were completing the check.");
+  const dup=findDupFace(face,null,false);
+  if(dup){
+   logE("Duplicate registration blocked: "+RD.name+" (ID ending "+RD.id.slice(-3)+") tried to register a face already on file for "+dup.name);
+   store.save();RD=null;stopCam();$("rhint").textContent="";$("rn").value=$("ri").value="";rShow(1);
+   return msg(m,DUP_MSG,"er");
+  }
+  mem.voters[RD.k]={name:RD.name,hint:RD.id.slice(-3),salt:RD.salt,pin:RD.pin,face,status:"pending",fails:0,locked:false,dupOf:null,created:Date.now()};
+  logE("Registration submitted by "+RD.name);
+  store.save();RD=null;stopCam();msg(m,"");rShow(4);
+ }catch(e){stopCam();$("rhint").textContent="";msg(m,e.message,"er")}
+ finally{b.disabled=false}
+};
+$("r4new").onclick=()=>{$("rn").value=$("ri").value="";msg($("rm"),"");rShow(1)};
+enter(["rn","ri","rp","rp2"],"r1go");
+
+/* ---------- voting ---------- */
+let S=null,vSel=null;
+const vShow=n=>{[1,3,4,5].forEach(i=>hide("v"+i,i!==n));setSteps($("vsteps"),n===1?1:n===3?2:3);hide("vsteps",n===5)};
+function closeSession(){if(S){clearInterval(S.tick);S=null}stopCam();hide("sess",true)}
+function endSession(text){
+ closeSession();vSel=null;
+ ["vi","vp","va"].forEach(i=>$(i).value="");$("vok").checked=false;
+ $("vhint").textContent="Position your face inside the outline.";
+ hide("vb",false);hide("vconf",true);
+ vShow(1);msg($("vm"),text||"",text?"er":"");
+}
+function startSession(k){
+ S={k,end:Date.now()+SESSION_MS,tick:null};
+ const upd=()=>{const l=S.end-Date.now();if(l<=0)return endSession("Your session timed out. Please sign in again.");
+  $("sleft").textContent=Math.floor(l/60000)+":"+String(Math.floor(l/1000)%60).padStart(2,"0")};
+ S.tick=setInterval(upd,1000);upd();hide("sess",false);
+}
+document.addEventListener("visibilitychange",()=>{if(document.hidden&&S)endSession("The session was cancelled because the page was left. Please sign in again.")});
+/* fetch the live voter record and make sure the session is still valid */
+function cur(){
+ if(!S)return null;store.load();
+ const r=mem.voters[S.k];
+ if(!r||r.status!=="approved"||r.locked||mem.voted.includes(S.k)){endSession("This session is no longer valid. Please speak to an election officer.");return null}
+ return r;
+}
+function strike(r,why){
+ r.fails=(r.fails||0)+1;
+ if(r.fails>=MAX_FAILS){r.locked=true;logE(r.name+" locked after "+MAX_FAILS+" failed attempts ("+why+")")}
+ else logE("Failed "+why+" for "+r.name);
+ store.save();
+ if(r.locked){endSession("Too many failed attempts. This voter is locked. Please see an election officer.");return true}
+ return false;
+}
+const left=r=>{const n=MAX_FAILS-r.fails;return n+(n===1?" attempt":" attempts")+" left."};
+
+$("v1go").onclick=async()=>{
+ const m=$("vm"),b=$("v1go"),id=$("vi").value.trim(),pin=$("vp").value;
+ if(!id||!/^\d{6}$/.test(pin))return msg(m,"Enter your Voter ID and 6-digit PIN.","er");
+ b.disabled=true;
+ try{
+  store.load();const k=await vkey(id),r=mem.voters[k];
+  const generic="The Voter ID or PIN is not correct, or this voter cannot vote right now.";
+  if(!r){await kdf(pin,mem.salt);await sleep(600);return msg(m,generic,"er")}
+  if(r.locked)return msg(m,"This voter is locked after repeated failed attempts. Please see an election officer.","er");
+  if((await kdf(pin,r.salt))!==r.pin){
+   if(strike(r,"PIN entry"))return;
+   return msg(m,generic+" "+left(r),"er");
+  }
+  if(mem.voted.includes(k))return msg(m,"This voter has already voted.","er");
+  if(r.status!=="approved")return msg(m,"This registration has not been approved yet. Please see an election officer.","er");
+  $("vp").value="";startSession(k);msg(m,"PIN accepted.","ok");vShow(3);
+  if(!(await startCam($("vv"))))msg(m,"The camera is blocked. Allow camera access and try again.","er");
+ }finally{b.disabled=false}
+};
+$("v3go").onclick=async()=>{
+ const m=$("vm"),b=$("v3go");
+ if(!stream&&!(await startCam($("vv"))))return msg(m,"The camera is blocked. Allow camera access and try again.","er");
+ b.disabled=true;
+ try{
+  msg(m,"");
+  let face;
+  try{face=await faceCheck($("vv"),$("vhint"))}
+  catch(e){$("vhint").textContent="Position your face inside the outline.";return msg(m,e.message,"er")}
+  const r=cur();if(!r)return;
+  const s=cos(face,r.face);
+  if(s<FACE_MATCH){$("vhint").textContent="Position your face inside the outline.";
+   if(strike(r,"face check"))return;
+   return msg(m,"Your face did not match ("+Math.round(s*100)+"%). Use similar lighting to registration. "+left(r),"er")}
+  const dup=findDupFace(face,S.k,true);
+  if(dup){
+   logE("Duplicate vote attempt blocked: "+r.name+" (ID ending "+r.hint+") matched the face of "+dup.name+", who already voted");
+   store.save();return endSession(DUP_MSG);
+  }
+  r.fails=0;store.save();stopCam();
+  drawBallot();vShow(4);msg(m,"Identity confirmed. Choose your candidate.","ok");
+ }finally{b.disabled=false}
+};
+function drawBallot(){
+ $("cl").innerHTML=CANDS.map((c,i)=>`<label class="cand" style="--pc:${c.c}"><input type="radio" name="cand" value="${i}"><span class="no">${i+1}</span><span class="nm"><b>${esc(c.n)}</b><span>${esc(c.p)}</span></span><span class="bubble"></span></label>`).join("");
+ document.querySelectorAll("input[name=cand]").forEach(x=>x.onchange=()=>{vSel=+x.value;$("review").disabled=false});
+ vSel=null;$("review").disabled=true;hide("vb",false);hide("vconf",true);
+}
+$("review").onclick=()=>{if(vSel===null)return;setSteps($("vsteps"),4);$("va").value="";$("vok").checked=false;$("pickname").textContent=CANDS[vSel].n;$("pickparty").textContent=CANDS[vSel].p;hide("vb",true);hide("vconf",false)};
+$("vback").onclick=()=>{setSteps($("vsteps"),3);hide("vb",false);hide("vconf",true)};
+$("vcast").onclick=async()=>{
+ const m=$("vm"),b=$("vcast");if(!S||vSel===null)return;
+ const pin=$("va").value;
+ if(!/^\d{6}$/.test(pin))return msg(m,"Enter your 6-digit PIN to authorize your vote.","er");
+ if(!$("vok").checked)return msg(m,"Tick the box to confirm and authorize your vote.","er");
+ b.disabled=true;
+ try{
+  const r0=cur();if(!r0)return;
+  if((await kdf(pin,r0.salt))!==r0.pin){
+   $("va").value="";
+   if(strike(r0,"vote authorization"))return;
+   return msg(m,"The PIN is not correct, so the vote was not authorized. "+left(r0),"er");
+  }
+  $("va").value="";
+  const ts=Math.floor(Date.now()/60000)*60000;let hash=null;
+  for(let t=0;t<3&&!hash;t++){
+   if(!cur())return;
+   const idx=mem.ledger.length,prev=idx?mem.ledger[idx-1].hash:"0";
+   const h=await sha(idx+"|"+vSel+"|"+ts+"|"+prev);
+   store.load();
+   if(mem.ledger.length!==idx)continue;
+   if(!mem.voters[S.k]||mem.voted.includes(S.k))return endSession("This session is no longer valid. Please speak to an election officer.");
+   mem.ledger.push({i:idx,c:vSel,ts,prev,hash:h});mem.voted.push(S.k);logE("A vote was authorized and recorded");store.save();hash=h;
+  }
+  if(!hash)return msg(m,"The vote could not be recorded. Please try again.","er");
+  closeSession();vSel=null;$("rcpt").textContent=hash;vShow(5);msg(m,"");
+ }finally{b.disabled=false}
+};
+$("vdone").onclick=()=>{endSession("");$("rcpt").textContent=""};
+enter(["vi","vp"],"v1go");enter(["va"],"vcast");
+
+/* ---------- admin ---------- */
+let adminOK=false,idleT=null,vf="all";
+const adminCheck=async p=>!!mem.admin&&(await kdf(p,mem.admin.salt))===mem.admin.hash;
+function adminRoute(){
+ store.load();msg($("am"),"");adminGate();
+ hide("a-setup",!!mem.admin||adminOK);hide("a-login",!mem.admin||adminOK);hide("a-dash",!adminOK);
+ if(adminOK)renderAdmin();
+}
+function adminOut(){
+ adminOK=false;clearTimeout(idleT);
+ ["res-body","vlist","aud-body","logs"].forEach(i=>$(i).innerHTML="");
+ ["apw","ap1","ap2","sp0","sp1","sp2","vq","rq"].forEach(i=>$(i).value="");
+}
+function touch(){if(!adminOK)return;clearTimeout(idleT);idleT=setTimeout(()=>{adminOut();adminRoute();msg($("am"),"You were signed out after 10 minutes of inactivity.")},IDLE_MS)}
+["click","keydown","input"].forEach(ev=>$("admin").addEventListener(ev,touch));
+function adminIn(){adminOK=true;touch();adminRoute();showSub("res")}
+
+$("asetup").onclick=async()=>{
+ const m=$("am"),p=$("ap1").value;
+ if(p.length<8)return msg(m,"The passcode must be at least 8 characters.","er");
+ if(p!==$("ap2").value)return msg(m,"The passcodes do not match.","er");
+ store.load();const salt=b64(rnd(16));
+ mem.admin={salt,hash:await kdf(p,salt),fails:0,strikes:0,until:0};
+ logE("Admin passcode created");store.save();adminIn();
+};
+$("alogin").onclick=async()=>{
+ store.load();const a=mem.admin,m=$("am");if(!a)return adminRoute();
+ const wait=a.until-Date.now();
+ if(wait>0)return msg(m,"Too many attempts. Try again in "+Math.ceil(wait/1000)+" seconds.","er");
+ if(!(await adminCheck($("apw").value))){
+  a.fails++;logE("Failed admin sign-in");
+  if(a.fails>=5){a.until=Date.now()+60000*2**Math.min(a.strikes,5);a.strikes++;a.fails=0;store.save();return msg(m,"Too many attempts. The sign-in is locked for a while.","er")}
+  store.save();return msg(m,"Incorrect passcode.","er");
+ }
+ a.fails=0;a.strikes=0;logE("Admin signed in");store.save();adminIn();
+};
+enter(["apw"],"alogin");enter(["ap1","ap2"],"asetup");
+$("aout").onclick=()=>{adminOut();adminRoute()};
+$("exp").onclick=()=>{
+ store.load();
+ const a=document.createElement("a");
+ a.href=URL.createObjectURL(new Blob([JSON.stringify(mem)],{type:"application/json"}));
+ a.download="securevote-backup-"+new Date().toISOString().slice(0,10)+".json";
+ document.body.appendChild(a);a.click();a.remove();
+ setTimeout(()=>URL.revokeObjectURL(a.href),2000);
+};
+["impS","impL"].forEach(i=>$(i).onclick=()=>$("impf").click());
+$("impf").onchange=async e=>{
+ const f=e.target.files[0];e.target.value="";if(!f)return;
+ try{
+  const o=JSON.parse(await f.text());
+  if(!(o&&o.voters&&o.ledger&&o.salt&&Array.isArray(o.cands)))throw 0;
+  mem=o;syncCands();store.save();adminOut();adminRoute();
+  msg($("am"),"Backup imported. Sign in with the passcode from the original device.","ok");
+ }catch(_){msg($("am"),"That file is not a valid SecureVote backup.","er")}
+};
+
+function showSub(s){
+ document.querySelectorAll("#subtabs button").forEach(b=>b.classList.toggle("on",b.dataset.s===s));
+ ["res","vot","aud","set"].forEach(x=>hide("ap-"+x,x!==s));msg($("am"),"");
+}
+document.querySelectorAll("#subtabs button").forEach(b=>b.onclick=()=>{showSub(b.dataset.s);renderAdmin()});
+const state=(k,r)=>mem.voted.includes(k)?"voted":r.locked?"locked":r.status==="approved"?"approved":"pending";
+const LABEL={pending:"Pending approval",approved:"Approved",voted:"Voted",locked:"Locked"};
+
+function renderAdmin(){store.load();renderResults();renderVoters();renderAudit();renderCands()}
+
+function renderCands(){
+ const locked=mem.ledger.length>0;
+ $("clead").textContent=locked?"Voting has started, so the candidate list is locked to keep the ballots consistent.":"These candidates appear on the ballot. You can add or remove candidates until the first vote is cast.";
+ hide("cform",locked);
+ $("clist").innerHTML=mem.cands.map((c,i)=>`<div class="vrow"><div><b>${esc(c.n)}</b><div class="meta">${esc(c.p)}</div></div>${locked||c.n==="NOTA"?"":`<div class="acts"><button class="btn sm dline" data-ci="${i}">Remove</button></div>`}</div>`).join("");
+}
+$("clist").addEventListener("click",async e=>{
+ const b=e.target.closest("button[data-ci]");if(!b)return;
+ store.load();const c=mem.cands[+b.dataset.ci];
+ if(!c||mem.ledger.length)return renderAdmin();
+ if(!(await ask({title:"Remove "+c.n+"?",body:"This candidate will be taken off the ballot.",ok:"Remove candidate",danger:true})))return;
+ store.load();if(mem.ledger.length)return renderAdmin();
+ mem.cands=mem.cands.filter(x=>x.n!==c.n);logE("Candidate removed: "+c.n);store.save();syncCands();renderAdmin();
+});
+$("cadd").onclick=()=>{
+ const m=$("am"),n=$("cn").value.trim().replace(/\s+/g," "),p=$("cp").value.trim().replace(/\s+/g," ")||"Independent";
+ store.load();
+ if(mem.ledger.length)return msg(m,"Voting has started, so candidates can no longer be added.","er");
+ if(n.length<2)return msg(m,"Enter the candidate's name.","er");
+ if(mem.cands.length>=MAX_CANDS)return msg(m,"The ballot can have at most "+MAX_CANDS+" entries.","er");
+ if(mem.cands.some(c=>c.n.toLowerCase()===n.toLowerCase()))return msg(m,"This candidate is already on the ballot.","er");
+ const c={n,p,c:CAND_COLORS[mem.cands.length%CAND_COLORS.length]};
+ const nota=mem.cands.findIndex(x=>x.n==="NOTA");
+ if(nota>=0)mem.cands.splice(nota,0,c);else mem.cands.push(c);
+ logE("Candidate added: "+n+" ("+p+")");store.save();syncCands();
+ $("cn").value=$("cp").value="";renderAdmin();msg(m,n+" was added to the ballot.","ok");
+};
+enter(["cn","cp"],"cadd");
+
+function renderResults(){
+ const t=CANDS.map(()=>0);mem.ledger.forEach(b=>{if(t[b.c]!==undefined)t[b.c]++});
+ const tot=mem.ledger.length,max=Math.max(...t);
+ const recs=Object.entries(mem.voters),appr=recs.filter(([k,r])=>r.status==="approved");
+ const votedAppr=appr.filter(([k])=>mem.voted.includes(k)).length;
+ const pend=recs.filter(([k,r])=>r.status!=="approved").length;
+ const turn=appr.length?Math.round(votedAppr/appr.length*100)+"%":"None";
+ $("res-body").innerHTML=`<div class="stats"><div><b>${recs.length}</b>Registered</div><div><b>${pend}</b>Pending</div><div><b>${tot}</b>Votes cast</div><div><b>${turn}</b>Turnout</div></div>`
+ +CANDS.map((c,i)=>`<div class="res"><div class="top"><span><b>${esc(c.n)}</b><small>${esc(c.p)}</small>${tot&&t[i]===max&&t.filter(x=>x===max).length===1?'<span class="badge approved">Leading</span>':""}</span><span class="n"><b>${t[i]}</b> ${tot?(t[i]/tot*100).toFixed(1):"0.0"}%</span></div><div class="meter"><i style="width:${tot?t[i]/tot*100:0}%;background:${c.c}"></i></div></div>`).join("");
+}
+
+async function renderVoters(){
+ const q=$("vq").value.trim().toLowerCase(),qk=q.length>=4?await vkey(q):null;
+ const all=Object.entries(mem.voters).map(([k,r])=>({k,r,s:state(k,r)}));
+ const cnt=s=>s==="all"?all.length:all.filter(x=>x.s===s).length;
+ $("seg").innerHTML=[["all","All"],["pending","Pending"],["approved","Approved"],["voted","Voted"],["locked","Locked"]]
+  .map(([s,l])=>`<button data-f="${s}" class="${vf===s?"on":""}">${l} ${cnt(s)}</button>`).join("");
+ const ord={pending:0,locked:1,approved:2,voted:3};
+ const rows=all.filter(x=>(vf==="all"||x.s===vf)&&(!q||x.r.name.toLowerCase().includes(q)||x.r.hint.toLowerCase()===q||x.k===qk))
+  .sort((a,b)=>ord[a.s]-ord[b.s]||a.r.name.localeCompare(b.r.name));
+ if(!rows.length){$("vlist").innerHTML=`<div class="empty">${all.length?"No voters match this search.":"No one has registered yet."}</div>`;return}
+ $("vlist").innerHTML=rows.slice(0,100).map(({k,r,s})=>{
+  const other=r.dupOf&&mem.voters[r.dupOf];
+  const acts=(s==="pending"?`<button class="btn sm" data-a="approve" data-k="${k}">Approve</button>`:"")
+   +(s==="locked"?`<button class="btn sm" data-a="unlock" data-k="${k}">Unlock</button>`:"")
+   +`<button class="btn sm dline" data-a="remove" data-k="${k}">Remove</button>`;
+  return `<div class="vrow"><div><b>${esc(r.name)}</b><span class="badge ${s}">${LABEL[s]}</span><div class="meta">ID ending ${esc(r.hint)}, registered ${fmtDate(r.created)}</div>${other?`<div class="alert">Face closely resembles ${esc(other.name)}. Check ID documents before approving.</div>`:""}</div><div class="acts">${acts}</div></div>`}).join("")
+  +(rows.length>100?`<div class="empty">Showing 100 of ${rows.length}. Narrow the search to see more.</div>`:"");
+}
+$("vq").addEventListener("input",renderVoters);
+$("seg").addEventListener("click",e=>{const b=e.target.closest("button");if(b){vf=b.dataset.f;renderVoters()}});
+$("vlist").addEventListener("click",async e=>{
+ const b=e.target.closest("button[data-a]");if(!b)return;
+ store.load();const k=b.dataset.k,r=mem.voters[k];if(!r)return renderAdmin();
+ const a=b.dataset.a;
+ if(a==="approve"){
+  const other=r.dupOf&&mem.voters[r.dupOf];
+  if(other&&!(await ask({title:"Approve "+r.name+"?",body:"This person's face closely resembles "+other.name+". Approve only after checking their ID documents in person.",ok:"Approve anyway"})))return;
+  r.status="approved";logE("Approved "+r.name);
+ }else if(a==="unlock"){r.locked=false;r.fails=0;logE("Unlocked "+r.name)}
+ else if(a==="remove"){
+  const voted=mem.voted.includes(k);
+  const body=voted?"This voter has already voted. Their ballot stays in the count because ballots are anonymous, and neither this ID nor this face can be used to vote again.":"This voter will be deleted and cannot vote. They can register again later.";
+  if(!(await ask({title:"Remove "+r.name+"?",body,ok:"Remove voter",danger:true})))return;
+  store.load();const rr=mem.voters[k];if(voted&&rr&&rr.face)(mem.blocked=mem.blocked||[]).push(rr.face);delete mem.voters[k];logE("Removed "+r.name+(voted?" (had already voted)":""));
+ }
+ store.save();renderAdmin();
+});
+
+async function renderAudit(){
+ let ok=true,prev="0",bad=-1,n=0;
+ for(const b of mem.ledger){if(b.i!==n||b.prev!==prev||b.hash!==await sha(b.i+"|"+b.c+"|"+b.ts+"|"+b.prev)){ok=false;bad=n;break}prev=b.hash;n++}
+ const sync=mem.ledger.length===mem.voted.length;
+ $("aud-body").innerHTML=`<h2>Audit</h2><div class="status ${ok?"ok":"er"}">${ok?"Ledger chain is intact. "+mem.ledger.length+" ballots verified.":"Tampering detected at ballot #"+bad+"."}</div>`
+  +`<div class="status ${sync?"ok":"er"}">${sync?"Ballot count matches the number of voters marked as voted.":"Mismatch: "+mem.ledger.length+" ballots recorded but "+mem.voted.length+" voters marked as voted."}</div>`;
+ $("logs").innerHTML=mem.log.length?mem.log.slice(0,60).map(l=>`<p><span>${fmtTime(l.t)}</span>${esc(l.m)}</p>`).join(""):`<div class="empty">No activity yet.</div>`;
+}
+$("rqgo").onclick=()=>{
+ const q=$("rq").value.trim().toLowerCase(),m=$("am");store.load();
+ if(!q)return msg(m,"Paste a receipt code first.","er");
+ const b=mem.ledger.find(x=>x.hash===q);
+ msg(m,b?"Receipt found. Ballot #"+b.i+" is in the ledger.":"No ballot matches this receipt.",b?"ok":"er");
+};
+
+$("spgo").onclick=async()=>{
+ const m=$("am"),n=$("sp1").value;store.load();
+ if(!(await adminCheck($("sp0").value)))return msg(m,"The current passcode is incorrect.","er");
+ if(n.length<8)return msg(m,"The new passcode must be at least 8 characters.","er");
+ if(n!==$("sp2").value)return msg(m,"The new passcodes do not match.","er");
+ const salt=b64(rnd(16));mem.admin.salt=salt;mem.admin.hash=await kdf(n,salt);logE("Admin passcode changed");store.save();
+ ["sp0","sp1","sp2"].forEach(i=>$(i).value="");msg(m,"Passcode changed.","ok");
+};
+$("wipe").onclick=async()=>{
+ if(!(await ask({title:"Erase all election data?",body:"Every voter, ballot and log entry will be deleted. This cannot be undone.",ok:"Erase everything",danger:true,pass:true})))return;
+ store.load();const a=mem.admin;mem=fresh();mem.admin=a;logE("Election data erased");store.save();renderAdmin();msg($("am"),"Election data erased.","ok");
+};
+
+/* ---------- confirm dialog ---------- */
+let dlgRes=null;
+$("dlg").addEventListener("close",()=>{if(dlgRes){const r=dlgRes;dlgRes=null;r(false)}});
+function ask({title,body,ok,danger,pass}){
+ return new Promise(res=>{
+  $("dt").textContent=title;$("db").textContent=body;$("de").textContent="";
+  $("dpw").value="";hide("dpw",!pass);hide("dpl",!pass);
+  $("dok").textContent=ok;$("dok").className="btn"+(danger?" danger":"");
+  dlgRes=res;
+  $("dno").onclick=()=>$("dlg").close();
+  $("dok").onclick=async()=>{
+   if(pass&&!(await adminCheck($("dpw").value))){msg($("de"),"Incorrect passcode.","er");return}
+   dlgRes=null;$("dlg").close();res(true);
+  };
+  $("dlg").showModal();
+ });
+}
+
+rShow(1);vShow(1);
+
+/* ---------- shared database (Firebase Firestore) ---------- */
+function adminGate(){
+ const off=cloudOn&&cloudWait;
+ $("asetup").disabled=$("alogin").disabled=off;
+ if(off&&tab==="admin")msg($("am"),"Connecting to the shared database...");
+}
+function cloudRefresh(){
+ adminGate();
+ if(tab==="admin"){if(adminOK)renderAdmin();else adminRoute()}
+}
+function initCloud(){
+ if(!cloudOn)return;
+ try{
+  if(!window.firebase)throw new Error("sdk");
+  firebase.initializeApp(FIREBASE_CONFIG);
+  cloudRef=firebase.firestore().collection("securevote").doc("state");
+ }catch(e){cloudWait=false;cloudErr=true;cloudRef=null;updateWarn();return}
+ adminGate();
+ /* if the database cannot be reached, allow local use but never overwrite shared data */
+ setTimeout(()=>{if(cloudWait){cloudWait=false;cloudErr=true;updateWarn();cloudRefresh()}},8000);
+ cloudRef.onSnapshot(snap=>{
+  if(snap.metadata.fromCache&&!snap.exists)return; /* wait for the server's answer */
+  cloudWait=false;
+  if(cloudErr){cloudErr=false;updateWarn()}
+  if(!snap.exists){
+   /* nothing shared yet: the first device with real data seeds the database */
+   const has=!!(mem.admin||Object.keys(mem.voters).length||mem.ledger.length||mem.log.length);
+   cloudReady=true;if(has)cloudPush();
+   return cloudRefresh();
+  }
+  cloudReady=true;
+  const raw=snap.data().json;
+  if(raw!==cloudLast){
+   try{
+    const m=JSON.parse(raw);
+    if(m&&m.voters&&m.ledger){
+     mem=m;
+     if(!Array.isArray(mem.cands)||!mem.cands.length)mem.cands=DEFAULT_CANDS.map(c=>({...c}));
+     syncCands();cloudLast=raw;
+     try{localStorage.setItem(KEY,raw)}catch(e){}
+    }
+   }catch(e){}
+  }
+  cloudRefresh();
+ },()=>{cloudWait=false;cloudErr=true;updateWarn();cloudRefresh()});
+}
+initCloud();
+</script></body></html>
