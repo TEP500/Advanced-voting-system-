@@ -1,4 +1,4 @@
-    
+  
 <!DOCTYPE html>
 <html lang="en"><head><meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
@@ -128,7 +128,7 @@ dialog h3{margin-top:0}
  </div>
 
  <div id="r3" class="hide">
-  <p>You will be asked to turn your head slowly left, then right, and then look straight at the camera. This confirms a real person is present.</p>
+  <p>Keep your <b>whole face</b> inside the outline, alone in the frame, with light on your face. You will turn your head slowly left, then right, and then look straight at the camera.</p>
   <div class="cam hide" id="rcam"><video id="rv" playsinline muted></video></div>
   <p class="hint" id="rhint"></p>
   <button class="btn block" id="r3go">Start face check</button>
@@ -157,7 +157,7 @@ dialog h3{margin-top:0}
 
  <div id="v3" class="hide">
   <div class="cam" id="vcam"><video id="vv" playsinline muted></video></div>
-  <p class="hint" id="vhint">Position your face inside the outline.</p>
+  <p class="hint" id="vhint">Keep your whole face inside the outline.</p>
   <button class="btn block" id="v3go">Start face check</button>
  </div>
 
@@ -268,6 +268,8 @@ dialog h3{margin-top:0}
  <div class="row"><button class="btn line" id="dno">Cancel</button><button class="btn" id="dok">Confirm</button></div>
 </dialog>
 
+<!-- Face recognition library (detects the WHOLE face and creates a 128-number face signature) -->
+<script src="https://cdn.jsdelivr.net/npm/@vladmandic/face-api@1.7.13/dist/face-api.js"></script>
 <script src="https://www.gstatic.com/firebasejs/10.12.2/firebase-app-compat.js"></script>
 <script src="https://www.gstatic.com/firebasejs/10.12.2/firebase-firestore-compat.js"></script>
 <script>
@@ -305,10 +307,13 @@ const DEFAULT_CANDS=[{n:"Aarav Sharma",p:"Unity Party",c:"#2f5bea"},{n:"Meera Iy
 const CAND_COLORS=["#7c3aed","#db2777","#0891b2","#65a30d","#b45309","#475569","#0d9488","#c2410c"],MAX_CANDS=12;
 const CANDS=[];
 const syncCands=()=>{CANDS.length=0;CANDS.push(...mem.cands)};
-const MAX_FAILS=3, SESSION_MS=240000, IDLE_MS=600000, LIVE_MIN=5, FACE_MATCH=0.6, FACE_DUP=0.8;
+/* Face distance: 0 = identical, about 0.3 = same person, 0.8+ = different people.
+   FACE_MATCH: a voter must be closer than this to their own registered face.
+   FACE_DUP: a new face closer than this to someone already registered is treated as the same person. */
+const MAX_FAILS=3, SESSION_MS=240000, IDLE_MS=600000, FACE_MATCH=0.5, FACE_DUP=0.5, YAW_MIN=0.15, SAMPLES=3;
 
 /* ---------- storage ---------- */
-const KEY="securevote.v2";
+const KEY="securevote.v3";
 let mem=null,persistOK=true;
 const fresh=()=>({salt:b64(rnd(16)),cands:DEFAULT_CANDS.map(c=>({...c})),voters:{},voted:[],blocked:[],ledger:[],admin:null,log:[]});
 const WARN0="Browser storage is unavailable, so registrations and votes will be lost when this page closes.";
@@ -348,57 +353,94 @@ async function kdf(secret,salt){
  const k=await crypto.subtle.importKey("raw",new TextEncoder().encode(secret),"PBKDF2",false,["deriveBits"]);
  return b64(await crypto.subtle.deriveBits({name:"PBKDF2",salt:unb64(salt),iterations:150000,hash:"SHA-256"},k,256));
 }
-/* ---------- camera, liveness, face ---------- */
+
+/* ---------- camera ---------- */
 let stream=null;
 async function startCam(v){
- try{stream=await navigator.mediaDevices.getUserMedia({video:{facingMode:"user",width:640,height:480}});
+ try{stream=await navigator.mediaDevices.getUserMedia({video:{facingMode:"user",width:{ideal:640},height:{ideal:480}}});
   v.srcObject=stream;await v.play();v.parentElement.classList.remove("hide");return true}
  catch(e){return false}
 }
 function stopCam(){if(stream){stream.getTracks().forEach(t=>t.stop());stream=null}
  document.querySelectorAll("video").forEach(v=>{v.srcObject=null});
  hide("rcam",true)}
-function grab(v,n){
- const c=document.createElement("canvas");c.width=c.height=n;
- const x=c.getContext("2d",{willReadFrequently:true}),s=Math.min(v.videoWidth,v.videoHeight);
- x.drawImage(v,(v.videoWidth-s)/2,(v.videoHeight-s)/2,s,s,0,0,n,n);
- const d=x.getImageData(0,0,n,n).data,g=new Float32Array(n*n);
- for(let i=0;i<g.length;i++)g[i]=.299*d[i*4]+.587*d[i*4+1]+.114*d[i*4+2];
- return g;
+
+/* ---------- face recognition (face-api.js) ---------- */
+const MODEL_URL="https://cdn.jsdelivr.net/npm/@vladmandic/face-api@1.7.13/model/";
+const MULTI="More than one face is in view. Only the voter may be in front of the camera.";
+let modelsP=null;
+function loadModels(){
+ if(!window.faceapi)return Promise.reject(new Error("The face recognition library could not be loaded. Check the internet connection and reload the page."));
+ if(!modelsP)modelsP=Promise.all([
+  faceapi.nets.tinyFaceDetector.loadFromUri(MODEL_URL),
+  faceapi.nets.faceLandmark68TinyNet.loadFromUri(MODEL_URL),
+  faceapi.nets.faceRecognitionNet.loadFromUri(MODEL_URL)
+ ]).catch(()=>{modelsP=null;throw new Error("The face models could not be loaded. Check the internet connection and try again.")});
+ return modelsP;
 }
-async function faceVec(v){
- if("FaceDetector" in window){let f=null;try{f=await new FaceDetector({fastMode:true}).detect(v)}catch(e){}
-  if(f&&!f.length)throw new Error("No face detected. Face the camera in good light.")}
- const g=grab(v,24);let m=0;for(const a of g)m+=a;m/=g.length;
- const z=Array.from(g,a=>a-m),n=Math.hypot(...z)||1;
- if(n/Math.sqrt(z.length)<8)throw new Error("The image is too dark, or the camera is covered.");
- return z.map(a=>+(a/n).toFixed(4));
+const DET=()=>new faceapi.TinyFaceDetectorOptions({inputSize:320,scoreThreshold:.5});
+/* head turn: nose position between the left and right edge of the face (0.5 = looking straight) */
+const yaw=l=>{const p=l.positions;return (p[30].x-p[0].x)/(p[16].x-p[0].x)};
+/* the whole face must be visible, not cut off, and at a sensible distance */
+function boxProblem(b,v){
+ const W=v.videoWidth,H=v.videoHeight,m=2;
+ if(b.width<W*.2)return"Move closer to the camera.";
+ if(b.width>W*.8)return"Move a little further from the camera.";
+ if(b.x<m||b.y<m||b.x+b.width>W-m||b.y+b.height>H-m)return"Keep your whole face inside the frame.";
+ return"";
 }
-const cos=(a,b)=>a.reduce((s,v,i)=>s+v*b[i],0);
+const dist=(a,b)=>{let s=0;for(let i=0;i<a.length;i++){const d=a[i]-b[i];s+=d*d}return Math.sqrt(s)};
+/* smallest distance between two sets of face signatures */
+function minDist(A,B){
+ if(!Array.isArray(A)||!Array.isArray(B)||!Array.isArray(B[0])||B[0].length!==128)return Infinity;
+ let m=Infinity;
+ for(const a of A)for(const b of B){const d=dist(a,b);if(d<m)m=d}
+ return m;
+}
 /* Finds an existing voter whose face matches. votedOnly limits the search to voters who already voted.
    mem.blocked keeps the faces of removed voters who had already voted, so removal cannot be used to vote again. */
-function findDupFace(face,skipK,votedOnly){
- let hit=null,best=0;
+function findDupFace(faces,skipK,votedOnly){
+ let hit=null,best=Infinity;
  for(const [k,r] of Object.entries(mem.voters)){
   if(k===skipK||!r.face||(votedOnly&&!mem.voted.includes(k)))continue;
-  const s=cos(face,r.face);if(s>=FACE_DUP&&s>best){best=s;hit=k}
+  const d=minDist(faces,r.face);if(d<FACE_DUP&&d<best){best=d;hit=k}
  }
  if(hit)return{name:mem.voters[hit].name};
- for(const f of (mem.blocked||[]))if(cos(face,f)>=FACE_DUP)return{name:"a removed voter who had already voted"};
+ for(const f of (mem.blocked||[]))if(minDist(faces,f)<FACE_DUP)return{name:"a removed voter who had already voted"};
  return null;
 }
 const DUP_MSG="Warning: this face is already registered. You are trying to register or vote more than once, which is not allowed. This attempt has been blocked and recorded for the election officer.";
-/* Liveness: the person must turn their head, which a held-up photo cannot do. Then a straight-on capture is taken. */
+/* Step 1 (liveness): the person turns their head left and right. A held-up photo cannot do this.
+   Step 2: several straight-on captures are taken and turned into face signatures. */
 async function faceCheck(v,hint){
+ hint.textContent="Loading face recognition...";
+ await loadModels();
  hint.textContent="Turn your head slowly left, then right.";
- const fr=[],t0=performance.now();
- while(performance.now()-t0<3200){fr.push(grab(v,24));await sleep(150)}
- let mx=0;
- for(let i=0;i<fr.length;i++)for(let j=i+1;j<fr.length;j++){let s=0;for(let k=0;k<fr[i].length;k++)s+=Math.abs(fr[i][k]-fr[j][k]);mx=Math.max(mx,s/fr[i].length)}
- if(mx<LIVE_MIN){hint.textContent="";throw new Error("No head movement was detected. Try again and turn your head slowly.")}
+ const ys=[];let total=0;const t0=performance.now();
+ while(performance.now()-t0<4500){
+  total++;
+  const d=await faceapi.detectAllFaces(v,DET()).withFaceLandmarks(true);
+  if(d.length>1)throw new Error(MULTI);
+  if(d.length===1)ys.push(yaw(d[0].landmarks));
+ }
+ if(ys.length<6||ys.length<total*.5)throw new Error("Your face was not clearly visible. Keep your whole face inside the outline, with light on your face.");
+ if(Math.max(...ys)-Math.min(...ys)<YAW_MIN)throw new Error("No head turn was detected. Try again and turn your head slowly left, then right.");
  hint.textContent="Now look straight at the camera and hold still.";
- await sleep(1600);
- const f=await faceVec(v);hint.textContent="";return f;
+ await sleep(900);
+ const out=[];let problem="";
+ for(let i=0;i<20&&out.length<SAMPLES;i++){
+  const d=await faceapi.detectAllFaces(v,DET()).withFaceLandmarks(true).withFaceDescriptors();
+  if(d.length>1)throw new Error(MULTI);
+  if(!d.length){problem="No face detected. Face the camera in good light.";continue}
+  const x=d[0];
+  problem=boxProblem(x.detection.box,v);if(problem)continue;
+  if(Math.abs(yaw(x.landmarks)-.5)>.12){problem="Look straight at the camera.";continue}
+  out.push(Array.from(x.descriptor,n=>+n.toFixed(4)));
+  await sleep(120);
+ }
+ hint.textContent="";
+ if(out.length<SAMPLES)throw new Error(problem||"The face check failed. Try again.");
+ return out;
 }
 
 /* ---------- tabs ---------- */
@@ -438,23 +480,27 @@ $("r1go").onclick=async()=>{
   RD={name,id:id.toUpperCase(),k,salt,pin:await kdf(p,salt)};
   $("rp").value=$("rp2").value="";
   msg(m,"");rShow(3);
+  loadModels().catch(()=>{});
  }finally{b.disabled=false}
 };
 $("r3go").onclick=async()=>{
  const m=$("rm"),b=$("r3go"),v=$("rv");b.disabled=true;
  try{
   if(!(await startCam(v)))throw new Error("The camera is blocked. Allow camera access (the page must use HTTPS) and try again.");
-  msg(m,"");$("rhint").textContent="Get ready.";await sleep(1200);
-  const face=await faceCheck(v,$("rhint"));
+  msg(m,"");$("rhint").textContent="Get ready.";await sleep(1000);
+  const faces=await faceCheck(v,$("rhint"));
+  /* the captures must all be the same person */
+  for(let i=0;i<faces.length;i++)for(let j=i+1;j<faces.length;j++)
+   if(dist(faces[i],faces[j])>.45)throw new Error("The face captures were not steady. Hold still and try again.");
   store.load();
   if(mem.voters[RD.k]||mem.voted.includes(RD.k))throw new Error("This Voter ID was registered while you were completing the check.");
-  const dup=findDupFace(face,null,false);
+  const dup=findDupFace(faces,null,false);
   if(dup){
    logE("Duplicate registration blocked: "+RD.name+" (ID ending "+RD.id.slice(-3)+") tried to register a face already on file for "+dup.name);
    store.save();RD=null;stopCam();$("rhint").textContent="";$("rn").value=$("ri").value="";rShow(1);
    return msg(m,DUP_MSG,"er");
   }
-  mem.voters[RD.k]={name:RD.name,hint:RD.id.slice(-3),salt:RD.salt,pin:RD.pin,face,status:"pending",fails:0,locked:false,dupOf:null,created:Date.now()};
+  mem.voters[RD.k]={name:RD.name,hint:RD.id.slice(-3),salt:RD.salt,pin:RD.pin,face:faces,status:"pending",fails:0,locked:false,dupOf:null,created:Date.now()};
   logE("Registration submitted by "+RD.name);
   store.save();RD=null;stopCam();msg(m,"");rShow(4);
  }catch(e){stopCam();$("rhint").textContent="";msg(m,e.message,"er")}
@@ -470,7 +516,7 @@ function closeSession(){if(S){clearInterval(S.tick);S=null}stopCam();hide("sess"
 function endSession(text){
  closeSession();vSel=null;
  ["vi","vp","va"].forEach(i=>$(i).value="");$("vok").checked=false;
- $("vhint").textContent="Position your face inside the outline.";
+ $("vhint").textContent="Keep your whole face inside the outline.";
  hide("vb",false);hide("vconf",true);
  vShow(1);msg($("vm"),text||"",text?"er":"");
 }
@@ -514,6 +560,7 @@ $("v1go").onclick=async()=>{
   if(mem.voted.includes(k))return msg(m,"This voter has already voted.","er");
   if(r.status!=="approved")return msg(m,"This registration has not been approved yet. Please see an election officer.","er");
   $("vp").value="";startSession(k);msg(m,"PIN accepted.","ok");vShow(3);
+  loadModels().catch(()=>{});
   if(!(await startCam($("vv"))))msg(m,"The camera is blocked. Allow camera access and try again.","er");
  }finally{b.disabled=false}
 };
@@ -523,19 +570,17 @@ $("v3go").onclick=async()=>{
  b.disabled=true;
  try{
   msg(m,"");
-  let face;
-  try{face=await faceCheck($("vv"),$("vhint"))}
-  catch(e){$("vhint").textContent="Position your face inside the outline.";return msg(m,e.message,"er")}
+  let faces;
+  try{faces=await faceCheck($("vv"),$("vhint"))}
+  catch(e){$("vhint").textContent="Keep your whole face inside the outline.";return msg(m,e.message,"er")}
   const r=cur();if(!r)return;
-  let s=cos(face,r.face);
-  /* be forgiving: if the first capture is below the threshold, take up to 3 more quick captures and use the best one */
-  for(let i=0;i<3&&s<FACE_MATCH;i++){
-   try{await sleep(350);const f2=await faceVec($("vv"));s=Math.max(s,cos(f2,r.face))}catch(e){}
-  }
-  if(s<FACE_MATCH){$("vhint").textContent="Position your face inside the outline.";
+  const d=minDist(faces,r.face);
+  if(!(d<FACE_MATCH)){
+   $("vhint").textContent="Keep your whole face inside the outline.";
    if(strike(r,"face check"))return;
-   return msg(m,"Your face did not match ("+Math.round(s*100)+"%). Look straight at the camera, at the same distance and in similar light as when you registered. "+left(r),"er")}
-  const dup=findDupFace(face,S.k,true);
+   return msg(m,"Your face did not match the registered voter. Look straight at the camera in similar light as when you registered. "+left(r),"er");
+  }
+  const dup=findDupFace(faces,S.k,true);
   if(dup){
    logE("Duplicate vote attempt blocked: "+r.name+" (ID ending "+r.hint+") matched the face of "+dup.name+", who already voted");
    store.save();return endSession(DUP_MSG);
@@ -822,4 +867,6 @@ function initCloud(){
  },()=>{cloudWait=false;cloudErr=true;updateWarn();cloudRefresh()});
 }
 initCloud();
+/* start downloading the face models in the background so the face check starts quickly */
+if(window.faceapi)loadModels().catch(()=>{});
 </script></body></html>
