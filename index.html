@@ -1,4 +1,4 @@
-
+            <!DOCTYPE html>
 <html lang="en"><head><meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
 <title>SecureVote</title>
@@ -270,12 +270,24 @@ dialog h3{margin-top:0}
 <script src="https://www.gstatic.com/firebasejs/10.12.2/firebase-app-compat.js"></script>
 <script src="https://www.gstatic.com/firebasejs/10.12.2/firebase-firestore-compat.js"></script>
 <script>
+/* ===== SHARED DATABASE SETTINGS (optional) =====
+   Leave as null to use the app on one device only.
+   To share data between phone and laptop, replace null with your Firebase web config object, for example:
+   window.SV_FIREBASE_CONFIG={apiKey:"...",authDomain:"...",projectId:"...",storageBucket:"...",messagingSenderId:"...",appId:"..."};
+   Paste ONLY the object (no "import" lines). A mistake here cannot break the rest of the app. */
+window.SV_FIREBASE_CONFIG=null;
+</script>
+<script>
+/* shows any script error on the page so problems are easy to see */
+window.addEventListener("error",function(e){
+ var b=document.getElementById("errbar");
+ if(!b){b=document.createElement("div");b.id="errbar";b.style.cssText="position:fixed;left:0;right:0;bottom:0;z-index:99;background:#b0281c;color:#fff;padding:10px 14px;font:14px/1.4 system-ui,sans-serif";document.body.appendChild(b)}
+ b.textContent="Script error: "+(e.message||"unknown")+(e.lineno?" (line "+e.lineno+")":"");
+});
+</script>
+<script>
 "use strict";
-/* ===== SHARED DATABASE SETTINGS =====
-   Paste your Firebase web app config between the braces below, e.g.
-   const FIREBASE_CONFIG={apiKey:"...",authDomain:"...",projectId:"...",storageBucket:"...",messagingSenderId:"...",appId:"..."};
-   While it is null the app keeps working per device (browser storage only). */
-const FIREBASE_CONFIG=null;
+const FIREBASE_CONFIG=window.SV_FIREBASE_CONFIG||null;
 const $=id=>document.getElementById(id);
 const hide=(id,h)=>$(id).classList.toggle("hide",!!h);
 const esc=s=>String(s).replace(/[&<>"']/g,c=>({"&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;","'":"&#39;"}[c]));
@@ -289,16 +301,4 @@ const fmtDate=t=>new Date(t).toLocaleDateString(undefined,{day:"numeric",month:"
 const fmtTime=t=>new Date(t).toLocaleString(undefined,{day:"numeric",month:"short",hour:"2-digit",minute:"2-digit"});
 
 const DEFAULT_CANDS=[{n:"Aarav Sharma",p:"Unity Party",c:"#2f5bea"},{n:"Meera Iyer",p:"Progress Alliance",c:"#12a150"},{n:"Rohan Das",p:"People's Front",c:"#d97706"},{n:"NOTA",p:"None of the above",c:"#667085"}];
-const CAND_COLORS=["#7c3aed","#db2777","#0891b2","#65a30d","#b45309","#475569","#0d9488","#c2410c"],MAX_CANDS=12;
-const CANDS=[];
-const syncCands=()=>{CANDS.length=0;CANDS.push(...mem.cands)};
-const MAX_FAILS=3, SESSION_MS=240000, IDLE_MS=600000, LIVE_MIN=5, FACE_MATCH=0.8, FACE_DUP=0.8;
-
-/* ---------- storage ---------- */
-const KEY="securevote.v2";
-let mem=null,persistOK=true;
-const fresh=()=>({salt:b64(rnd(16)),cands:DEFAULT_CANDS.map(c=>({...c})),voters:{},voted:[],blocked:[],ledger:[],admin:null,log:[]});
-const WARN0="Browser storage is unavailable, so registrations and votes will be lost when this page closes.";
-const WARN1="Cannot reach the shared database. Changes are kept on this device only and will not appear on other devices.";
-const cloudOn=!!(FIREBASE_CONFIG&&script></body></html>
-
+const CAND_COLORS=["#7c3aed","#db2777","#0891b2","#65a30d","#b45309","#47556
