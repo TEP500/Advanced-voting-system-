@@ -305,7 +305,7 @@ const DEFAULT_CANDS=[{n:"Aarav Sharma",p:"Unity Party",c:"#2f5bea"},{n:"Meera Iy
 const CAND_COLORS=["#7c3aed","#db2777","#0891b2","#65a30d","#b45309","#475569","#0d9488","#c2410c"],MAX_CANDS=12;
 const CANDS=[];
 const syncCands=()=>{CANDS.length=0;CANDS.push(...mem.cands)};
-const MAX_FAILS=3, SESSION_MS=240000, IDLE_MS=600000, LIVE_MIN=5, FACE_MATCH=0.8, FACE_DUP=0.8;
+const MAX_FAILS=3, SESSION_MS=240000, IDLE_MS=600000, LIVE_MIN=5, FACE_MATCH=0.6, FACE_DUP=0.8;
 
 /* ---------- storage ---------- */
 const KEY="securevote.v2";
@@ -527,10 +527,14 @@ $("v3go").onclick=async()=>{
   try{face=await faceCheck($("vv"),$("vhint"))}
   catch(e){$("vhint").textContent="Position your face inside the outline.";return msg(m,e.message,"er")}
   const r=cur();if(!r)return;
-  const s=cos(face,r.face);
+  let s=cos(face,r.face);
+  /* be forgiving: if the first capture is below the threshold, take up to 3 more quick captures and use the best one */
+  for(let i=0;i<3&&s<FACE_MATCH;i++){
+   try{await sleep(350);const f2=await faceVec($("vv"));s=Math.max(s,cos(f2,r.face))}catch(e){}
+  }
   if(s<FACE_MATCH){$("vhint").textContent="Position your face inside the outline.";
    if(strike(r,"face check"))return;
-   return msg(m,"Your face did not match ("+Math.round(s*100)+"%). Use similar lighting to registration. "+left(r),"er")}
+   return msg(m,"Your face did not match ("+Math.round(s*100)+"%). Look straight at the camera, at the same distance and in similar light as when you registered. "+left(r),"er")}
   const dup=findDupFace(face,S.k,true);
   if(dup){
    logE("Duplicate vote attempt blocked: "+r.name+" (ID ending "+r.hint+") matched the face of "+dup.name+", who already voted");
